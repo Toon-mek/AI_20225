@@ -19,59 +19,38 @@ st.set_page_config(page_title="Laptop Recommender (BMCS2003)", layout="wide")
 st.title("💻 Laptop Recommender – BMCS2003")
 st.caption("Content-based scoring with lab-style train/test evaluation")
 
-# ---------- Google Drive helpers ----------
-@st.cache_data(show_spinner=False)
-def _extract_drive_id(s: str) -> str:
-    """Accept file ID or any common Drive link and return the file ID."""
-    s = s.strip()
-    if "drive.google.com" in s:
-        if "id=" in s:
-            return s.split("id=")[1].split("&")[0]
-        if "/d/" in s:
-            return s.split("/d/")[1].split("/")[0]
-    return s  # assume it's already an ID
+# ---------- CONFIG: set your Google Drive file here ----------
+DRIVE_FILE_ID = "https://drive.google.com/file/d/1ys7aa3wdxPcbk7QIzW9tmmnvSlR9HeG3/view?usp=drive_link"  
+LOCAL_CSV_PATH = "data/_drive_dataset.csv"
 
+# ---------- Data loader (Drive-only) ----------
 @st.cache_data(show_spinner=True)
-def download_from_drive_to(path_out: str, file_id_or_link: str) -> str:
+def download_data_from_drive(file_id: str, dest_path: str) -> pd.DataFrame:
     """
-    Download CSV from Google Drive to path_out.
-    Make sure your file is shared as 'Anyone with the link: Viewer'.
+    Download the CSV from Google Drive (by FILE ID) to dest_path and return as DataFrame.
+    Cache is keyed by file_id, so updating the ID invalidates cache automatically.
     """
-    os.makedirs(os.path.dirname(path_out), exist_ok=True)
-    fid = _extract_drive_id(file_id_or_link)
-    url = f"https://drive.google.com/file/d/1ys7aa3wdxPcbk7QIzW9tmmnvSlR9HeG3/view?usp=drive_link"
-    gdown.download(url, path_out, quiet=True)
-    if not os.path.exists(path_out) or os.path.getsize(path_out) == 0:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    url = f"https://drive.google.com/uc?id={file_id}"
+    gdown.download(url, dest_path, quiet=True)
+    if not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
         raise RuntimeError("Download failed or empty file. Check Drive sharing & File ID.")
-    return path_out
-
-@st.cache_data(show_spinner=False)
-def read_csv_cached(local_path: str) -> pd.DataFrame:
-    return pd.read_csv(local_path)
+    df = pd.read_csv(dest_path)
+    # light clean: standardize TouchScreen to Yes/No
+    if "TouchScreen" in df.columns:
+        df["TouchScreen"] = (
+            df["TouchScreen"].astype(str).str.strip().str.lower().map({"yes": "Yes", "no": "No"}).fillna(df["TouchScreen"])
+        )
+    return df
 
 # ---------- Sidebar: data source + parameters ----------
+# ---------- Sidebar: only user inputs (no upload, no default toggle) ----------
 with st.sidebar:
-    st.header("Data Source")
-    upl = st.file_uploader("Upload CSV (optional)", type=["csv"])
-
-    use_drive = st.checkbox("Load from Google Drive", value=False)
-    drive_input = st.text_input(
-        "Google Drive File ID or Share Link",
-        help="Example ID: 1Woi9GqjiQE7KWIem_7ICrjXfOpuTyUL_  "
-             "• Or paste a share link (the app will extract the ID)."
-    )
-
-    use_default = st.checkbox("Use bundled sample (fallback)", value=not use_drive)
-    default_path = "data/laptop_market_2025_10000_with_chromebook.csv"
-
-    st.markdown(
-        "Expected columns:\n"
-        "`Category, Model, CPU, GPU, RAM_GB, Storage_GB, Storage_Type, "
-        "Screen_Size, Weight_kg, OS, Battery_Wh, TouchScreen, Price_USD, Price_MYR`."
-    )
-
-    st.divider()
     st.header("User Inputs")
+    st.caption("Dataset is loaded from Google Drive automatically.")
+    st.text_input("Google Drive File ID", value=DRIVE_FILE_ID, key="file_id", help="Change if you move the file in Drive.")
+    refresh = st.button("🔄 Re-download from Drive")
+
     budget = st.number_input("Budget (MYR)", min_value=0, value=4000, step=100)
     purpose = st.selectbox("Purpose", options=list(USE_PROFILES.keys()), index=0)
     min_ram = st.selectbox("Minimum RAM (GB)", options=[0, 4, 8, 16, 32, 64], index=3)
@@ -91,45 +70,29 @@ with st.sidebar:
     k_eval = st.slider("k for hit-rate / confusion", min_value=1, max_value=20, value=5)
     show_cm = st.checkbox("Show confusion matrix", value=False)
 
-# ---------- Load dataset (priority: upload > drive > default) ----------
-df = None
+# ---------- Load dataset from Drive ----------
+file_id = st.session_state.get("file_id", DRIVE_FILE_ID)
+if refresh:
+    # clear cache for a forced re-download
+    download_data_from_drive.clear()
+
 try:
-    if upl is not None:
-        df = pd.read_csv(upl)
-    elif use_drive and drive_input.strip():
-        local_tmp = "data/_drive_dataset.csv"
-        csv_path = download_from_drive_to(local_tmp, drive_input)
-        df = read_csv_cached(csv_path)
-    elif use_default:
-        if not os.path.exists(default_path):
-            st.warning("Bundled sample not found. Upload a CSV or use Google Drive.")
-            st.stop()
-        df = pd.read_csv(default_path)
-    else:
-        st.warning("Please upload a CSV, provide a Google Drive file, or enable the bundled sample.")
-        st.stop()
-
-    # validate & light clean using backend
-    df = load_data(df) if isinstance(df, str) else df.drop_duplicates().reset_index(drop=True)
-
-    # If user provided arbitrary columns, try to be forgiving:
-    # (load_data in abc.py validates strictly; here we allow preview then rely on recommend() to filter)
+    df = download_data_from_drive(file_id, LOCAL_CSV_PATH)
 except Exception as e:
-    st.error(f"Failed to load dataset: {e}")
+    st.error(f"Failed to download dataset from Drive: {e}")
     st.stop()
 
-# ---------- Optional quick filters before recommend ----------
+# ---------- Optional pre-filters ----------
 subset = df.copy()
-if must_touch in ["Yes", "No"]:
+if "TouchScreen" in subset.columns and must_touch in ["Yes", "No"]:
     subset = subset[subset["TouchScreen"].astype(str).str.lower() == must_touch.lower()]
-if must_os != "Any":
+if "OS" in subset.columns and must_os != "Any":
     subset = subset[subset["OS"].astype(str) == must_os]
 
-# Build min_spec dictionary
 min_specs = {}
-if min_ram > 0:
+if "RAM_GB" in subset.columns and min_ram > 0:
     min_specs["RAM_GB"] = min_ram
-if min_storage > 0:
+if "Storage_GB" in subset.columns and min_storage > 0:
     min_specs["Storage_GB"] = min_storage
 
 # ---------- Recommendations ----------
@@ -149,8 +112,8 @@ try:
             "Category","Model","CPU","GPU","RAM_GB","Storage_GB","Storage_Type",
             "Screen_Size","Weight_kg","OS","Battery_Wh","TouchScreen","Price_MYR"
         ]
-        existing_cols = [c for c in show_cols if c in recs.columns]
-        st.dataframe(recs[existing_cols].reset_index(drop=True), use_container_width=True)
+        show_cols = [c for c in show_cols if c in recs.columns]
+        st.dataframe(recs[show_cols].reset_index(drop=True), use_container_width=True)
 except Exception as e:
     st.error(f"Recommend failed: {e}")
 
@@ -185,5 +148,4 @@ else:
     st.info("Tick the evaluation checkbox in the sidebar to run the 50/50 split test.")
 
 st.divider()
-st.caption("Tip: On Streamlit Cloud, set the main file to `app.py`. Ensure `gdown` is in `requirements.txt`.")
-
+st.caption("Dataset is fetched from Google Drive every run (cached). Make sure the file sharing is set to 'Anyone with the link: Viewer'.")
