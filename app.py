@@ -8,14 +8,13 @@ import streamlit as st
 import gdown
 
 # === import your backend ===
-from abc import (
+from recommender import (
     load_data,
     recommend,
     train_test_eval,
     eval_confusion_labstyle,
     USE_PROFILES,
 )
-
 st.set_page_config(page_title="Laptop Recommender (BMCS2003)", layout="wide")
 st.title("💻 Laptop Recommender – BMCS2003")
 st.caption("Content-based scoring with lab-style train/test evaluation")
