@@ -15,7 +15,7 @@ st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide
 # Local CSV name (if present, we use this)
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 # Or set your Google Drive file id here or in Streamlit Secrets as DATA_DRIVE_ID
-DRIVE_ID = st.secrets.get("DATA_DRIVE_ID", "") or "PUT_YOUR_DRIVE_FILE_ID_HERE"
+DRIVE_ID = st.secrets.get("DATA_DRIVE_ID", "") or "https://docs.google.com/spreadsheets/d/18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4/edit?usp=sharing"
 
 # =========================
 # Data loading
