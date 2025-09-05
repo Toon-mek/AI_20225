@@ -1,25 +1,44 @@
-# app.py
 import streamlit as st
 import pandas as pd
+import os
+from pathlib import Path
+import gdown
 
 from recommender import (
-    load_data,
+    load_data as _load_csv_direct,  # keep original function if you want
     recommend,
     evaluate_precision_at_k,
     evaluate_with_split,
 )
 
-DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
+DRIVE_ID = st.secrets.get("DATA_DRIVE_ID", "") or "https://docs.google.com/spreadsheets/d/18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4/edit?gid=418897947#gid=418897947"
+
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def _download_from_drive(file_id: str, output: str) -> str:
+    """Download dataset from Google Drive to a local temp path and return the path."""
+    if not file_id or file_id == "PUT_YOUR_FILE_ID_HERE":
+        raise FileNotFoundError("Google Drive file id not set. Add to st.secrets['DATA_DRIVE_ID'] or hardcode it.")
+    url = f"https://drive.google.com/uc?id={file_id}"
+    gdown.download(url, output, quiet=True)
+    return output
 
 @st.cache_data(show_spinner=False)
-def _load():
-    return load_data(DATA_PATH)
+def _load_df():
+    # 1) Prefer local CSV in repo (fastest, no network)
+    p = Path(DATA_PATH)
+    if p.exists() and p.is_file():
+        return pd.read_csv(p)
+
+    # 2) Else, fetch from Google Drive (cached for the session)
+    tmp_path = "/tmp/laptops.csv"  # or use p.name to keep the same filename
+    downloaded = _download_from_drive(DRIVE_ID, tmp_path)
+    return pd.read_csv(downloaded)
 
 st.set_page_config(page_title="Laptop Recommender (BMCS2009)", layout="wide")
 st.title("💻 Laptop Recommender — BMCS2009")
 
-df = _load()
-st.caption(f"{len(df)} models loaded")
+df = _load_df()
+st.caption(f"{len(df)} models loaded from {'Google Drive (cached)'}")
 
 # ---------------------------
 # Sidebar: Preferences
