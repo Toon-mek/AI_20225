@@ -450,15 +450,15 @@ prefs = dict(
 if st.button("Recommend by Preferences"):
     with st.spinner("Scoring..."):
         recs = recommend_by_prefs(df, vec, X, prefs, algo, top_n)
-    if recs.empty:
-        st.write("No matching laptops found for your preferences.")
-    else:
-       st.dataframe(recs, width="stretch")
-        st.download_button(
-            "Download results (CSV)",
-            recs.to_csv(index=False).encode("utf-8"),
-            file_name=f"laptop_recommendations_{algo.lower()}.csv",
-        )
+if recs.empty:
+    st.write("No matching laptops found for your preferences.")
+else:
+    st.dataframe(recs, width="stretch")
+    st.download_button(
+        "Download results (CSV)",
+        recs.to_csv(index=False).encode("utf-8"),
+        file_name=f"laptop_recommendations_{algo.lower()}.csv",
+    )
 DEV_MODE = True  # set to False to hide this panel from normal users
 
 if DEV_MODE:
@@ -481,7 +481,7 @@ if DEV_MODE:
                     st.write("Test label counts")
                     st.write(te_df["intended_use_case"].value_counts(dropna=False))
 
-            st.dataframe(res, use_container_width=True)
+            st.dataframe(res, width=True)
             if not res.empty and res["precision@k"].notna().any():
                 st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
                 st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
