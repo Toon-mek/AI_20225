@@ -1,151 +1,124 @@
-# app.py — Streamlit UI for Laptop Recommender (BMCS2003)
-# Works with abc.py (backend). Supports Google Drive CSV, file upload, or bundled sample.
-
-import os
-import pandas as pd
-import numpy as np
+# app.py
 import streamlit as st
-import gdown
+import pandas as pd
 
-# === import your backend ===
 from recommender import (
     load_data,
     recommend,
-    train_test_eval,
-    eval_confusion_labstyle,
-    USE_PROFILES,
+    evaluate_precision_at_k,
+    evaluate_with_split,
 )
-st.set_page_config(page_title="Laptop Recommender (BMCS2003)", layout="wide")
-st.title("💻 Laptop Recommender – BMCS2003")
-st.caption("Content-based scoring with lab-style train/test evaluation")
 
-# ---------- CONFIG: set your Google Drive file here ----------
-DRIVE_FILE_ID = "https://drive.google.com/file/d/1ys7aa3wdxPcbk7QIzW9tmmnvSlR9HeG3/view?usp=drive_link"  
-LOCAL_CSV_PATH = "data/_drive_dataset.csv"
+DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 
-# ---------- Data loader (Drive-only) ----------
-@st.cache_data(show_spinner=True)
-def download_data_from_drive(file_id: str, dest_path: str) -> pd.DataFrame:
-    """
-    Download the CSV from Google Drive (by FILE ID) to dest_path and return as DataFrame.
-    Cache is keyed by file_id, so updating the ID invalidates cache automatically.
-    """
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    url = f"https://drive.google.com/uc?id={file_id}"
-    gdown.download(url, dest_path, quiet=True)
-    if not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
-        raise RuntimeError("Download failed or empty file. Check Drive sharing & File ID.")
-    df = pd.read_csv(dest_path)
-    # light clean: standardize TouchScreen to Yes/No
-    if "TouchScreen" in df.columns:
-        df["TouchScreen"] = (
-            df["TouchScreen"].astype(str).str.strip().str.lower().map({"yes": "Yes", "no": "No"}).fillna(df["TouchScreen"])
-        )
-    return df
+@st.cache_data(show_spinner=False)
+def _load():
+    return load_data(DATA_PATH)
 
-# ---------- Sidebar: data source + parameters ----------
-# ---------- Sidebar: only user inputs (no upload, no default toggle) ----------
+st.set_page_config(page_title="Laptop Recommender (BMCS2009)", layout="wide")
+st.title("💻 Laptop Recommender — BMCS2009")
+
+df = _load()
+st.caption(f"{len(df)} models loaded")
+
+# ---------------------------
+# Sidebar: Preferences
+# ---------------------------
 with st.sidebar:
-    st.header("User Inputs")
-    st.caption("Dataset is loaded from Google Drive automatically.")
-    st.text_input("Google Drive File ID", value=DRIVE_FILE_ID, key="file_id", help="Change if you move the file in Drive.")
-    refresh = st.button("🔄 Re-download from Drive")
+    st.subheader("Preferences")
 
-    budget = st.number_input("Budget (MYR)", min_value=0, value=4000, step=100)
-    purpose = st.selectbox("Purpose", options=list(USE_PROFILES.keys()), index=0)
-    min_ram = st.selectbox("Minimum RAM (GB)", options=[0, 4, 8, 16, 32, 64], index=3)
-    min_storage = st.selectbox("Minimum Storage (GB)", options=[0, 64, 128, 256, 512, 1024, 2048], index=4)
-    must_touch = st.selectbox("Touch Screen?", options=["Any", "Yes", "No"], index=0)
-    must_os = st.selectbox(
-        "OS Preference",
-        options=["Any", "Windows 11 Home", "Windows 11 Pro", "macOS 15", "ChromeOS",
-                 "Windows 11 Home (ARM)", "Windows 11 Home / Linux"],
-        index=0
+    price_min = int(max(0, float(df["price_myr"].min())) if "price_myr" in df else 0)
+    price_max = int(min(20000, float(df["price_myr"].max())) if "price_myr" in df else 20000)
+    budget = st.slider(
+        "Budget (MYR)",
+        min_value=0,
+        max_value=price_max if price_max > 0 else 20000,
+        value=(price_min if price_min > 0 else 1500, min(price_max, 10000) if price_max else 6000),
+        step=100,
     )
-    topk = st.slider("Top-K recommendations", min_value=5, max_value=30, value=10)
+
+    if "intended_use_case" in df and df["intended_use_case"].dropna().size:
+        options = sorted({str(x) for x in df["intended_use_case"].dropna().tolist() if str(x).strip()})
+    else:
+        options = ["Student", "Gaming", "Creator", "Business", "Programming"]
+    use_case = st.selectbox("Use case", options)
+
+    colA, colB = st.columns(2)
+    with colA:
+        min_ram = st.number_input("Min RAM (GB)", value=8, min_value=0, step=4)
+        min_storage = st.number_input("Min Storage (GB)", value=512, min_value=0, step=128)
+        min_vram = st.number_input("Min GPU VRAM (GB)", value=0, min_value=0, step=2)
+        min_cores = st.number_input("Min CPU Cores", value=4, min_value=0, step=1)
+        min_battery_wh = st.number_input("Min Battery (Wh)", value=0, min_value=0, step=5)
+    with colB:
+        min_screen, max_screen = st.slider("Screen size (inches)", 10.0, 18.0, (13.0, 16.0), 0.1)
+        max_weight = st.number_input("Max Weight (kg)", value=3.0, min_value=0.0, step=0.1)
+        min_refresh = st.number_input("Min Refresh (Hz)", value=60, min_value=0, step=30)
+        min_year = st.number_input("Min Release Year", value=2019, min_value=2015, max_value=2025, step=1)
 
     st.divider()
-    st.header("Evaluation (Lab Style)")
-    run_eval = st.checkbox("Run 50/50 train–test evaluation", value=False)
-    k_eval = st.slider("k for hit-rate / confusion", min_value=1, max_value=20, value=5)
-    show_cm = st.checkbox("Show confusion matrix", value=False)
+    algo = st.selectbox("Algorithm", ["Hybrid", "Content-Based", "Rule-Based"])
+    top_k = st.slider("Top K", 3, 20, 10)
+    alpha = st.slider("Hybrid α (Content weight)", 0.0, 1.0, 0.6, 0.05)
 
-# ---------- Load dataset from Drive ----------
-file_id = st.session_state.get("file_id", DRIVE_FILE_ID)
-if refresh:
-    # clear cache for a forced re-download
-    download_data_from_drive.clear()
-
-try:
-    df = download_data_from_drive(file_id, LOCAL_CSV_PATH)
-except Exception as e:
-    st.error(f"Failed to download dataset from Drive: {e}")
-    st.stop()
-
-# ---------- Optional pre-filters ----------
-subset = df.copy()
-if "TouchScreen" in subset.columns and must_touch in ["Yes", "No"]:
-    subset = subset[subset["TouchScreen"].astype(str).str.lower() == must_touch.lower()]
-if "OS" in subset.columns and must_os != "Any":
-    subset = subset[subset["OS"].astype(str) == must_os]
-
-min_specs = {}
-if "RAM_GB" in subset.columns and min_ram > 0:
-    min_specs["RAM_GB"] = min_ram
-if "Storage_GB" in subset.columns and min_storage > 0:
-    min_specs["Storage_GB"] = min_storage
-
-# ---------- Recommendations ----------
-st.subheader("Recommendations")
-try:
-    recs = recommend(
-        subset,
-        budget_myr=float(budget),
-        purpose=purpose,
-        min_specs=min_specs,
-        top_k=topk
-    )
-    if recs.empty:
-        st.warning("No recommendations match the filters. Try increasing budget or relaxing constraints.")
-    else:
-        show_cols = [
-            "Category","Model","CPU","GPU","RAM_GB","Storage_GB","Storage_Type",
-            "Screen_Size","Weight_kg","OS","Battery_Wh","TouchScreen","Price_MYR"
-        ]
-        show_cols = [c for c in show_cols if c in recs.columns]
-        st.dataframe(recs[show_cols].reset_index(drop=True), use_container_width=True)
-except Exception as e:
-    st.error(f"Recommend failed: {e}")
-
-# ---------- Evaluation ----------
-st.divider()
-st.subheader("📊 Evaluation (Lab-style 50/50 Split)")
-st.caption(
-    "Split 50/50. For each test row, set purpose from its category and budget≈its price, "
-    "recommend top-k from train, and compute hit-rate. Optionally show confusion matrix."
+prefs = dict(
+    budget_min=budget[0],
+    budget_max=budget[1],
+    use_case=use_case,
+    min_ram=min_ram,
+    min_storage=min_storage,
+    min_vram=min_vram,
+    min_cpu_cores=min_cores,
+    min_battery_wh=min_battery_wh,
+    min_refresh=min_refresh,
+    min_screen=min_screen,
+    max_screen=max_screen,
+    max_weight=max_weight,
+    min_year=min_year,
+    alpha=alpha,
 )
 
-if run_eval:
-    purpose_map = {
-        "gaming": "gaming",
-        "ultrabook": "study_programming",
-        "convertible": "office_browsing",
-        "workstation": "content_creation",
-        "compact": "study_programming",
-        "chromebook": "chromebook_use",
-    }
-    try:
-        res = train_test_eval(df, purpose_map, test_size=0.5, seed=42, k=k_eval)
-        st.json(res)
+algo_key = {"Hybrid": "hybrid", "Content-Based": "content", "Rule-Based": "rule"}[algo]
 
-        if show_cm:
-            res_cm = eval_confusion_labstyle(df, purpose_map, test_size=0.5, seed=42, k=k_eval)
-            st.write(f"Accuracy: {res_cm['accuracy']}  •  Precision(macro): {res_cm['precision_macro']}  •  Recall(macro): {res_cm['recall_macro']}")
-            st.dataframe(res_cm["confusion_matrix"], use_container_width=True)
-    except Exception as e:
-        st.error(f"Evaluation failed: {e}")
-else:
-    st.info("Tick the evaluation checkbox in the sidebar to run the 50/50 split test.")
+# ---------------------------
+# Recommend
+# ---------------------------
+with st.spinner("Scoring laptops..."):
+    recs = recommend(df, prefs, algo=algo_key, top_k=top_k)
 
-st.divider()
-st.caption("Dataset is fetched from Google Drive every run (cached). Make sure the file sharing is set to 'Anyone with the link: Viewer'.")
+st.subheader("Results")
+st.dataframe(recs, use_container_width=True)
+
+csv = recs.to_csv(index=False).encode("utf-8")
+st.download_button("Download results (CSV)", data=csv, file_name="laptop_recommendations.csv")
+
+# ---------------------------
+# Quick Evaluation (same data)
+# ---------------------------
+with st.expander("Quick Evaluation (Precision@K by use-case)"):
+    k_eval = st.slider("K", 3, 20, 10, key="k_eval")
+    labels = (
+        sorted({str(x) for x in df["intended_use_case"].dropna().tolist() if str(x).strip()})
+        if "intended_use_case" in df and df["intended_use_case"].dropna().size
+        else ["Gaming", "Student", "Creator", "Business"]
+    )
+    scenarios = [(lab, {**prefs, "use_case": lab}) for lab in labels]
+    eval_df = evaluate_precision_at_k(df, scenarios, algo=algo_key, k=k_eval)
+    st.dataframe(eval_df, use_container_width=True)
+
+# ---------------------------
+# Practical Block: Train/Test + Tuning
+# ---------------------------
+with st.expander("Train/Test split (as in practical)"):
+    test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, help="Portion of data used for TEST")
+    k_tt = st.slider("K for Precision@K", 3, 20, 10, key="k_tt")
+    if st.button("Run train/test evaluation"):
+        with st.spinner("Splitting data, tuning α on TRAIN, evaluating on TEST..."):
+            summary, alpha_table, test_results = evaluate_with_split(df, test_size=test_size, k=k_tt)
+        st.write(f"**Train**: {summary['n_train']} rows | **Test**: {summary['n_test']} rows")
+        st.write(f"**Best α (hybrid)**: {summary['best_alpha']:.2f}")
+        st.write(f"**Mean Precision@{k_tt} on TEST**: {summary['mean_precision@k_test']}")
+        st.markdown("**Alpha tuning on TRAIN**")
+        st.dataframe(alpha_table, use_container_width=True)
+        st.markdown(f"**Per-scenario Precision@{k_tt} on TEST**")
+        st.dataframe(test_results, use_container_width=True)
