@@ -31,8 +31,7 @@ def load_dataset() -> pd.DataFrame:
     p = Path(DATA_PATH)
     if p.exists():
         return pd.read_csv(p, low_memory=False)
-    tmp = "/tmp/laptops.csv"
-    downloaded = download_data_from_drive(DRIVE_ID, tmp)
+    downloaded = download_sheet_csv("/tmp/laptops.csv")
     return pd.read_csv(downloaded, low_memory=False)
 
 # =========================
