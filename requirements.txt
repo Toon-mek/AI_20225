@@ -2,4 +2,3 @@ streamlit==1.37.1
 pandas==2.2.2
 numpy==1.26.4
 gdown==5.2.0
-scikit-learn==1.5.1
