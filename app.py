@@ -38,83 +38,6 @@ def load_dataset() -> pd.DataFrame:
 # =========================
 # Prep / Utilities
 # =========================
-def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
-    """Stratified split by intended_use_case when available."""
-    if "intended_use_case" in df.columns:
-        strat = df["intended_use_case"].fillna("unknown")
-    else:
-        strat = None
-    train_df, test_df = train_test_split(
-        df, test_size=test_size, random_state=random_state, stratify=strat
-    )
-    return train_df.reset_index(drop=True), test_df.reset_index(drop=True)
-
-def build_tfidf_split(train_text: pd.Series, test_text: pd.Series):
-    """Fit TF-IDF on TRAIN only; transform TEST with the same vectorizer."""
-    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
-    X_train = vec.fit_transform(train_text.fillna(""))
-    X_test  = vec.transform(test_text.fillna(""))
-    return vec, X_train, X_test
-
-def evaluate_precision_at_k_train_test(train_df: pd.DataFrame,
-                                       test_df: pd.DataFrame,
-                                       k: int = 10,
-                                       alpha: float = 0.6) -> pd.DataFrame:
-    """
-    For each use-case label, build a preference query, rank TEST items (Hybrid),
-    and compute Precision@K vs. test_df['intended_use_case'].
-    """
-    # Fit TF-IDF on TRAIN; create TEST matrix with the same vectorizer
-    vec, _Xtr, Xte = build_tfidf_split(train_df["spec_text"], test_df["spec_text"])
-
-    # Use-case labels from TRAIN (fallback if missing)
-    if "intended_use_case" in train_df and train_df["intended_use_case"].dropna().size:
-        labels = sorted({str(x).strip() for x in train_df["intended_use_case"].dropna() if str(x).strip()})
-    else:
-        labels = ["Gaming", "Student", "Creator", "Business"]
-
-    results = []
-    for lab in labels:
-        # Build a reasonable preference query for this scenario
-        q_prefs = dict(
-            use_case=lab,
-            budget_min=float(pd.to_numeric(test_df.get("price_myr"), errors="coerce").quantile(0.05)) if "price_myr" in test_df else 0,
-            budget_max=float(pd.to_numeric(test_df.get("price_myr"), errors="coerce").quantile(0.95)) if "price_myr" in test_df else 20000,
-            min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4,
-            min_year=2018, min_refresh=60, min_battery_wh=0, max_weight=3.0,
-            alpha=alpha,
-        )
-        # Budget mask on TEST
-        if "price_myr" in test_df:
-            price = pd.to_numeric(test_df["price_myr"], errors="coerce")
-            mask = (price.between(q_prefs["budget_min"], q_prefs["budget_max"], inclusive="both")) | price.isna()
-        else:
-            mask = pd.Series(True, index=test_df.index)
-
-        view = test_df.loc[mask].copy()
-        if view.empty:
-            results.append({"scenario": lab, "matched@k": 0, "precision@k": np.nan})
-            continue
-
-        # Content similarity on TEST using the TRAIN-fit vectorizer
-        query_text = build_pref_query(q_prefs)
-        sim_all = compute_similarity_to_query(vec, Xte, query_text)  # uses your cached fn
-        sim = sim_all[mask.values]
-
-        # Hybrid score on TEST
-        if sim.max() > sim.min():
-            sim_norm = (sim - sim.min()) / (sim.max() - sim.min())
-        else:
-            sim_norm = sim
-        rb = rule_based_scores(view, lab)
-        scores = alpha * sim_norm + (1 - alpha) * rb
-
-        topk = view.assign(score=scores).sort_values("score", ascending=False).head(k)
-        matched = (topk.get("intended_use_case", pd.Series(dtype=str)).astype(str).str.lower() == lab.lower()).sum()
-        results.append({"scenario": lab, "matched@k": int(matched), "precision@k": round(matched / k, 3)})
-
-    return pd.DataFrame(results)
-
 EXPECTED = [
     "brand","series","model","year",
     "cpu_brand","cpu_family","cpu_model","cpu_cores",
@@ -202,6 +125,117 @@ def compute_similarity_to_query(_vec: TfidfVectorizer, _X, query_text: str) -> n
     q = _vec.transform([query_text])
     sim = cosine_similarity(q, _X).ravel()
     return sim
+
+def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
+    """
+    Safer stratified split by 'intended_use_case'.
+    - Collapses ultra-rare labels (<2 rows) to 'other'
+    - If still infeasible for chosen test_size, falls back to non-stratified.
+    """
+    if "intended_use_case" not in df.columns:
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
+        return tr.reset_index(drop=True), te.reset_index(drop=True)
+
+    y = df["intended_use_case"].astype(str).str.strip()
+    y = y.replace({"nan": "", "None": ""})
+    y = y.mask(y.eq(""), "unknown")
+
+    vc = y.value_counts()
+    rare = vc[vc < 2].index
+    if len(rare) > 0:
+        y = y.where(~y.isin(rare), "other")
+
+    n_test = max(1, int(round(len(df) * test_size)))
+    if y.nunique() > n_test:
+        order = y.value_counts(ascending=True).index
+        keep = set(order[-n_test:])
+        y = y.where(y.isin(keep), "other")
+
+    try:
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=y)
+    except ValueError:
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
+    return tr.reset_index(drop=True), te.reset_index(drop=True)
+
+
+def evaluate_precision_recall_at_k_train_test(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    k: int = 10,
+    alpha: float = 0.6
+) -> pd.DataFrame:
+    """
+    Fit TF-IDF on TRAIN only; evaluate on TEST.
+    For each 'intended_use_case' label, build a preference query, score TEST with Hybrid,
+    and compute Precision@K and Recall@K (scenario-level recall).
+    """
+    # Fit TF-IDF on TRAIN only
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
+    X_train = vec.fit_transform(train_df["spec_text"].fillna(""))
+    X_test  = vec.transform(test_df["spec_text"].fillna(""))
+
+    # Labels (scenarios) to evaluate
+    if "intended_use_case" in train_df and train_df["intended_use_case"].dropna().size:
+        labels = sorted({str(x).strip() for x in train_df["intended_use_case"].dropna() if str(x).strip()})
+    else:
+        labels = ["Gaming", "Student", "Creator", "Business"]
+
+    price_te = pd.to_numeric(test_df.get("price_myr"), errors="coerce") if "price_myr" in test_df else None
+    results = []
+
+    for lab in labels:
+        # Build a reasonable preference query for this scenario
+        prefs = dict(
+            use_case=lab,
+            budget_min=float(price_te.quantile(0.05)) if price_te is not None else 0,
+            budget_max=float(price_te.quantile(0.95)) if price_te is not None else 20000,
+            min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4,
+            min_year=2018, min_refresh=60, min_battery_wh=0, max_weight=3.0,
+            alpha=alpha,
+        )
+
+        # Budget mask on TEST
+        if price_te is not None:
+            mask = (price_te.between(prefs["budget_min"], prefs["budget_max"], inclusive="both")) | price_te.isna()
+        else:
+            mask = pd.Series(True, index=test_df.index)
+
+        view = test_df.loc[mask].copy()
+        if view.empty:
+            results.append({"scenario": lab, "matched@k": 0, "precision@k": np.nan, "recall@k": np.nan})
+            continue
+
+        # Content similarity on TEST using TRAIN-fit vectorizer
+        query_text = build_pref_query(prefs)  # uses your existing helper
+        q = vec.transform([query_text])
+        sim_all = cosine_similarity(q, X_test).ravel()
+        sim = sim_all[mask.values]
+
+        # Hybrid score
+        if sim.max() > sim.min():
+            sim_norm = (sim - sim.min()) / (sim.max() - sim.min())
+        else:
+            sim_norm = sim
+        rb = rule_based_scores(view, lab)  # reuses your rule-based function
+        scores = alpha * sim_norm + (1 - alpha) * rb
+
+        topk = view.assign(score=scores).sort_values("score", ascending=False).head(k)
+
+        # Scenario-level match: does top-K contain the target label?
+        truth_labels = topk.get("intended_use_case", pd.Series(dtype=str)).astype(str).str.lower()
+        matched = (truth_labels == lab.lower()).sum()
+        precision = matched / max(k, 1)
+        recall = 1.0 if matched > 0 else 0.0
+
+        results.append({
+            "scenario": lab,
+            "matched@k": int(matched),
+            "precision@k": round(precision, 3),
+            "recall@k": round(recall, 3),
+        })
+
+    return pd.DataFrame(results)
+
 
 # =========================
 # Rule-based scoring
@@ -425,14 +459,35 @@ if st.button("Recommend by Preferences"):
             recs.to_csv(index=False).encode("utf-8"),
             file_name=f"laptop_recommendations_{algo.lower()}.csv",
         )
-with st.expander("Train/Test evaluation (Precision@K)"):
-    test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05)
-    k_eval    = st.slider("K", 3, 20, 10, key="k_eval")
-    alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="alpha_tt")
-    if st.button("Run train/test evaluation"):
-        tr_df, te_df = split_df(df, test_size=test_size)
-        res = evaluate_precision_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt)
-        st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
-        st.dataframe(res, use_container_width=True)
-        if not res.empty and res["precision@k"].notna().any():
-            st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
+DEV_MODE = True  # set to False to hide this panel from normal users
+
+if DEV_MODE:
+    with st.expander("Train/Test evaluation (Precision@K & Recall@K)"):
+        test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
+        k_eval    = st.slider("K", 3, 20, 10, key="tt_k")
+        alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, float(alpha) if "alpha" in locals() else 0.6, 0.05, key="tt_alpha")
+
+        if st.button("Run train/test evaluation"):
+            tr_df, te_df = split_df(df, test_size=test_size)
+            res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt)
+
+            st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
+            if "intended_use_case" in df.columns:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("Train label counts")
+                    st.write(tr_df["intended_use_case"].value_counts(dropna=False))
+                with col2:
+                    st.write("Test label counts")
+                    st.write(te_df["intended_use_case"].value_counts(dropna=False))
+
+            st.dataframe(res, use_container_width=True)
+            if not res.empty and res["precision@k"].notna().any():
+                st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
+                st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
+
+            st.download_button(
+                "Download evaluation (CSV)",
+                res.to_csv(index=False).encode("utf-8"),
+                file_name=f"eval_precision_recall_at_{k_eval}.csv",
+            )
