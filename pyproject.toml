@@ -1,0 +1,12 @@
+# pyproject.toml
+[project]
+name = "ai_20225"
+version = "0.0.1"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "streamlit==1.37.1",
+  "pandas==2.2.2",
+  "numpy==1.26.4",
+  "scikit-learn==1.5.1",
+  "gdown==5.2.0"
+]
