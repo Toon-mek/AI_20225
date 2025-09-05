@@ -447,18 +447,22 @@ prefs = dict(
     alpha=alpha
 )
 
+recs = None
 if st.button("Recommend by Preferences"):
     with st.spinner("Scoring..."):
         recs = recommend_by_prefs(df, vec, X, prefs, algo, top_n)
-if recs.empty:
-    st.write("No matching laptops found for your preferences.")
-else:
-    st.dataframe(recs, width="stretch")
-    st.download_button(
-        "Download results (CSV)",
-        recs.to_csv(index=False).encode("utf-8"),
-        file_name=f"laptop_recommendations_{algo.lower()}.csv",
-    )
+
+if recs is not None:
+    if recs.empty:
+        st.write("No matching laptops found for your preferences.")
+    else:
+        st.dataframe(recs, width="stretch")
+        st.download_button(
+            "Download results (CSV)",
+            recs.to_csv(index=False).encode("utf-8"),
+            file_name=f"laptop_recommendations_{algo.lower()}.csv",
+        )
+
 DEV_MODE = True  # set to False to hide this panel from normal users
 
 if DEV_MODE:
