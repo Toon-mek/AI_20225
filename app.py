@@ -111,21 +111,21 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # Content features (TF-IDF)
 # =========================
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
     vec = TfidfVectorizer(ngram_range=(1,2), min_df=2, stop_words=None)
     X = vec.fit_transform(spec_text.fillna(""))
     return vec, X
 
 @st.cache_data(show_spinner=False)
-def compute_similarity_to_row(X, row_index: int) -> np.ndarray:
-    sim = cosine_similarity(X[row_index], X).ravel()
+def compute_similarity_to_row(_X, row_index: int) -> np.ndarray:
+    sim = cosine_similarity(_X[row_index], _X).ravel()
     return sim
 
 @st.cache_data(show_spinner=False)
-def compute_similarity_to_query(vec: TfidfVectorizer, X, query_text: str) -> np.ndarray:
-    q = vec.transform([query_text])
-    sim = cosine_similarity(q, X).ravel()
+def compute_similarity_to_query(_vec: TfidfVectorizer, _X, query_text: str) -> np.ndarray:
+    q = _vec.transform([query_text])
+    sim = cosine_similarity(q, _X).ravel()
     return sim
 
 # =========================
