@@ -12,19 +12,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 # =========================
 st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
 
-# Local CSV name (if present, we use this)
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
-# Or set your Google Drive file id here or in Streamlit Secrets as DATA_DRIVE_ID
-DRIVE_ID = st.secrets.get("DATA_DRIVE_ID", "") or "https://docs.google.com/spreadsheets/d/18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4/edit?usp=sharing"
+DRIVE_ID = "18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4"
+GID = "418897947" 
 
 # =========================
 # Data loading
 # =========================
 @st.cache_data(show_spinner=False, ttl=24*3600)
-def download_data_from_drive(file_id: str, output: str) -> str:
-    if not file_id or file_id == "PUT_YOUR_DRIVE_FILE_ID_HERE":
-        raise FileNotFoundError("CSV not found locally and Google Drive ID not set.")
-    url = f"https://drive.google.com/uc?id={file_id}"
+def download_sheet_csv(output="/tmp/laptops.csv"):
+    url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
     gdown.download(url, output, quiet=True)
     return output
 
