@@ -114,13 +114,13 @@ def build_tfidf(spec_text: pd.Series):
     X = vec.fit_transform(spec_text.fillna(""))
     return vec, X
 
-def compute_similarity_to_row(_X, row_index: int) -> np.ndarray:
+def compute_row_sim(_X, row_index: int) -> np.ndarray:
     return cosine_similarity(_X[row_index], _X).ravel()
 
-def compute_similarity_to_query(_vec: TfidfVectorizer, _X, query_text: str) -> np.ndarray:
+def compute_query_sim(_vec: TfidfVectorizer, _X, query_text: str) -> np.ndarray:
     q = _vec.transform([query_text])
     return cosine_similarity(q, _X).ravel()
-
+    
 def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
     """
     Safer stratified split by 'intended_use_case'.
@@ -281,7 +281,7 @@ def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int 
         st.write("Model not found.")
         return pd.DataFrame()
     i = idxs[0]
-    sim = compute_similarity_to_row(X, i)
+    sim = compute_row_sim(X, i)
     order = np.argsort(-sim)
     order = [j for j in order if j != i][:top_n]
     out = df.iloc[order].copy()
@@ -314,7 +314,7 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
         s = rule_based_scores(view, prefs.get("use_case"))
     else:
         q = build_pref_query(prefs)
-        sim = compute_similarity_to_query(vec, X, q)
+        sim = compute_query_sim(vec, X, q)
         sim = sim[m]
         if algo == "Content-Based":
             s = sim
@@ -448,7 +448,7 @@ if st.button("Recommend by Preferences"):
     if recs.empty:
         st.write("No matching laptops found for your preferences.")
     else:
-        st.dataframe(recs, use_container_width=True)
+       st.dataframe(recs, width="stretch")
         st.download_button(
             "Download results (CSV)",
             recs.to_csv(index=False).encode("utf-8"),
