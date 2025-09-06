@@ -107,6 +107,79 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return data.reset_index(drop=True)
 
+# ---------- Validations & business rules ----------
+def validate_prefs(prefs: dict) -> list[str]:
+    """Return a list of validation error strings (empty if OK)."""
+    errs = []
+    if prefs.get("budget_min", 0) < 0:
+        errs.append("Budget min cannot be negative.")
+    if prefs.get("budget_max", 0) < prefs.get("budget_min", 0):
+        errs.append("Budget max must be ≥ min.")
+    for k in ("min_ram","min_storage","min_vram","min_cpu_cores","min_refresh","min_battery_wh"):
+        v = prefs.get(k, 0)
+        if v is not None and float(v) < 0:
+            errs.append(f"{k} cannot be negative.")
+    if prefs.get("max_weight") is not None and float(prefs["max_weight"]) <= 0:
+        errs.append("Max weight must be > 0.")
+    return errs
+
+
+def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
+    """Adjust prefs (soft constraints) based on use-case; return (new_prefs, notices)."""
+    p = dict(prefs)
+    notes = []
+    u = str(p.get("use_case", "")).lower()
+
+    if u in ("gaming", "gamer"):
+        if float(p.get("min_vram", 0)) < 4:
+            p["min_vram"] = 4
+            notes.append("Gaming: raised min VRAM to 4 GB.")
+        if float(p.get("min_refresh", 0)) < 60:
+            p["min_refresh"] = 60
+            notes.append("Gaming: raised min refresh to 60 Hz.")
+
+    if u in ("student", "office", "productivity"):
+        if float(p.get("max_weight", 99)) > 2.0:
+            p["max_weight"] = 2.0
+            notes.append("Student/Office: tightened max weight to 2.0 kg.")
+
+    return p, notes
+
+def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
+    """Build a boolean mask from numeric constraints + budget."""
+    m = pd.Series(True, index=df.index)
+
+    # Budget (keep NaN price too)
+    if "price_myr" in df:
+        price = pd.to_numeric(df["price_myr"], errors="coerce")
+        m &= (price.between(prefs.get("budget_min", 0), prefs.get("budget_max", float("inf")))) | price.isna()
+
+    # Simple ≥ filters
+    def ge(col, key):
+        if key in prefs and col in df and prefs[key] is not None:
+            v = float(prefs[key])
+            return pd.to_numeric(df[col], errors="coerce").ge(v).fillna(False)
+        return pd.Series(True, index=df.index)
+
+    m &= ge("ram_base_GB", "min_ram")
+    m &= ge("storage_primary_capacity_GB", "min_storage")
+    m &= ge("gpu_vram_GB", "min_vram")
+    m &= ge("cpu_cores", "min_cpu_cores")
+    m &= ge("display_refresh_Hz", "min_refresh")
+    m &= ge("battery_capacity_Wh", "min_battery_wh")
+
+    # Year ≥
+    if "year" in df and "min_year" in prefs and prefs["min_year"] is not None:
+        yr = pd.to_numeric(df["year"], errors="coerce")
+        m &= yr.ge(float(prefs["min_year"])).fillna(False)
+
+    # Weight ≤
+    if "weight_kg" in df and "max_weight" in prefs and prefs["max_weight"] is not None:
+        w = pd.to_numeric(df["weight_kg"], errors="coerce")
+        m &= w.le(float(prefs["max_weight"])).fillna(False)
+
+    return m
+
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
@@ -305,34 +378,46 @@ def build_pref_query(prefs: dict) -> str:
     if prefs.get("max_weight"): parts += [f"WT{prefs['max_weight']}KG"]
     return " ".join(parts)
 
-def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10):
-    # budget prefilter (keep NaN price too)
-    pmin, pmax = prefs.get("budget_min", 0), prefs.get("budget_max", float("inf"))
-    m = (df["price_myr"].between(pmin, pmax, inclusive="both") | df["price_myr"].isna()) if "price_myr" in df else np.ones(len(df), dtype=bool)
-    view = df[m].copy()
+def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
+    """
+    Recommend laptops using rule/content/hybrid with validations and business rules.
+    """
+    # 1) Validate inputs
+    errs = validate_prefs(prefs)
+    if errs:
+        st.error(" | ".join(errs))
+        return pd.DataFrame()
+
+    # 2) Enforce business rules (soft constraints)
+    prefs2, notes = enforce_business_rules(prefs)
+    if notes:
+        st.info(" ".join(notes))
+
+    # 3) Filter candidates by numeric constraints + budget
+    mask = make_filter_mask(df, prefs2)
+    view = df.loc[mask].copy()
     if view.empty:
         return view
 
+    # 4) Score
     if algo == "Rule-Based":
-        s = rule_based_scores(view, prefs.get("use_case"))
+        scores = rule_based_scores(view, prefs2.get("use_case"))
     else:
-        q = build_pref_query(prefs)
-        sim = compute_query_sim(vec, X, q)
-        sim = sim[m]
-        if algo == "Content-Based":
-            s = sim
-        else:
-            # Hybrid
-            if sim.max() > sim.min():
-                sim_norm = (sim - sim.min()) / (sim.max() - sim.min())
-            else:
-                sim_norm = sim
-            rb = rule_based_scores(view, prefs.get("use_case"))
-            a = float(prefs.get("alpha", 0.6))
-            s = a * sim_norm + (1 - a) * rb
+        query = build_pref_query(prefs2)
+        sim_all = compute_query_sim(vec, X, query)   # keep using your compute_query_sim
+        sim = sim_all[mask.values]
 
-    view = view.copy()
-    view["score"] = s
+        if algo == "Content-Based":
+            scores = sim
+        else:
+            rng = np.ptp(sim)
+            sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
+            rb = rule_based_scores(view, prefs2.get("use_case"))
+            a = float(prefs2.get("alpha", 0.6))
+            scores = a * sim_norm + (1 - a) * rb
+
+    # 5) Rank & return
+    view["score"] = scores
     cols = [c for c in [
         "brand","series","model","year","price_myr",
         "cpu_brand","cpu_family","cpu_model","cpu_cores",
@@ -462,6 +547,7 @@ if recs is not None:
             recs.to_csv(index=False).encode("utf-8"),
             file_name=f"laptop_recommendations_{algo.lower()}.csv",
         )
+        
 DEV_MODE= True
 
 if DEV_MODE:
