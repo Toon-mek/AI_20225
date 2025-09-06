@@ -309,7 +309,7 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
         prefs = dict(
             budget_min=budget[0], budget_max=budget[1],
             use_case=style_bucket,          # from the radio
-            min_vram_default = 4 if style_bucket == "Gaming" else 0
+            min_vram_default = 4 if style_bucket == "Gaming" else 0,
             min_ram=min_ram,
             min_storage=min_storage,
             min_vram=0,
