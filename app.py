@@ -725,8 +725,19 @@ with st.container():
     # 1) Budget
     price_min = int(max(0, pd.to_numeric(df["price_myr"], errors="coerce").min(skipna=True))) if "price_myr" in df else 0
     price_max = int(min(20000, pd.to_numeric(df["price_myr"], errors="coerce").max(skipna=True))) if "price_myr" in df else 20000
-    budget = st.slider("Budget (MYR)", 0, max(price_max, 10000),
-                       (max(price_min, 1500), min(price_max, 8000)), 100)
+    pc = pd.to_numeric(df.get("price_myr"), errors="coerce").dropna().astype(int)
+    if pc.empty:
+        # safe fallback if the column is missing/empty
+        budget = (1500, 8000)
+    else:
+        price_options = sorted(pd.unique(pc))
+        # default to full range (you can change to 25–75th percentile if you like)
+        default_range = (price_options[0], price_options[-1])
+        budget = st.select_slider(
+            "Budget (MYR)",
+            options=price_options,          # only values that exist in the data
+            value=default_range
+        )
 
     # 2) Style
     style_choice = st.radio("Preferred style", STYLE_CHOICES, horizontal=True)
