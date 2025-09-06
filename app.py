@@ -493,6 +493,61 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
 
     return mask
 
+def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
+    """Recommend laptops using rule/content/hybrid with validations + business rules."""
+    # 1) Validate inputs
+    errs = validate_prefs(prefs)
+    if errs:
+        st.error(" | ".join(errs))
+        return pd.DataFrame()
+
+    # 2) Enforce soft business rules
+    prefs2, notes = enforce_business_rules(prefs)
+    if notes:
+        st.info(" ".join(notes))
+
+    # 3) Filter candidates (hard constraints)
+    mask = make_filter_mask(df, prefs2)
+    view = df.loc[mask].copy()
+    if view.empty:
+        return view
+
+    # 4) Score
+    if algo == "Rule-Based":
+        scores = rule_based_scores(view, prefs2.get("use_case"))
+    else:
+        # Guard: empty TF-IDF vocabulary
+        if getattr(X, "shape", (0, 0))[1] == 0:
+            st.warning("Content-based scoring unavailable (empty TF-IDF). Showing rule-based instead.")
+            scores = rule_based_scores(view, prefs2.get("use_case"))
+        else:
+            query = build_pref_query(prefs2)
+            sim_all = compute_query_sim(vec, X, query)
+            sim = sim_all[mask.values]
+
+            if algo == "Content-Based":
+                scores = sim
+            else:
+                # Hybrid
+                rng = np.ptp(sim)
+                sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
+                rb = rule_based_scores(view, prefs2.get("use_case"))
+                a = float(prefs2.get("alpha", 0.6))
+                scores = a * sim_norm + (1 - a) * rb
+
+    # 5) Rank & return
+    view["score"] = scores
+    cols = [c for c in [
+        "brand","series","model","year","price_myr",
+        "cpu_brand","cpu_family","cpu_model","cpu_cores",
+        "gpu_brand","gpu_model","gpu_vram_GB",
+        "ram_base_GB","ram_type",
+        "storage_primary_type","storage_primary_capacity_GB",
+        "display_size_in","display_resolution","display_refresh_Hz","display_panel",
+        "battery_capacity_Wh","weight_kg","os","intended_use_case","score"
+    ] if c in view.columns]
+    return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
+
 # UI
 st.markdown("""
 <style>
@@ -535,7 +590,7 @@ with st.expander("📋 Data validation & data quality checks", expanded=False):
     nulls = summarize_nulls(df)
     if (nulls["nulls"] > 0).any():
         st.write("**Null counts (post-clean):**")
-        st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
+        st.dataframe(nulls[nulls["nulls"] > 0], width="True")
 
     issues += range_checks(df)
 
@@ -621,7 +676,6 @@ prefs = dict(
     alpha=alpha
 )
 
-recs = None
 # --- Action: Recommend by Preferences ---
 recs = None
 if st.button("Recommend by Preferences"):
@@ -632,7 +686,7 @@ if recs is not None:
     if recs.empty:
         st.warning("No matching laptops found for your preferences.")
     else:
-        st.dataframe(recs, width="stretch")  # <- replaces deprecated use_container_width
+        st.dataframe(recs, width="True")  # <- replaces deprecated use_container_width
         st.download_button(
             "Download results (CSV)",
             recs.to_csv(index=False).encode("utf-8"),
@@ -661,7 +715,7 @@ if DEV_MODE:
                     st.write("Test label counts")
                     st.write(te_df["intended_use_case"].value_counts(dropna=False))
 
-            st.dataframe(res, width="stretch")
+            st.dataframe(res, width="True")
             if not res.empty and res["precision@k"].notna().any():
                 st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
                 st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
