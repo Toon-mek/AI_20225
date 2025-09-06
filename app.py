@@ -306,11 +306,17 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
             lo, hi = 0.0, 20000.0
 
         prefs = dict(
-            use_case=lab,
-            budget_min=lo, budget_max=hi,
-            min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4,
-            min_year=2018, min_refresh=60, min_battery_wh=0, max_weight=3.0,
-            alpha=alpha,
+            budget_min=budget[0], budget_max=budget[1],
+            use_case=style_bucket,          # from the radio
+            min_ram=min_ram,
+            min_storage=min_storage,
+            min_vram=0,
+            min_cpu_cores=4,
+            min_year=min_year,
+            min_refresh=min_refresh,
+            min_battery_wh=min_battery_wh,
+            max_weight=max_weight,
+            alpha=balance                   # from the balance slider
         )
 
         # Budget mask on TEST (properly indented)
@@ -511,11 +517,6 @@ def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
     return p, notes
 
 def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
-    """
-    Build a boolean mask for hard filters. Missing values in the data do NOT
-    exclude rows (i.e., they pass the filter).
-    """
-    n = len(df)
     mask = pd.Series(True, index=df.index)
 
     def ge(col, v):
@@ -556,29 +557,23 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
     return mask
 
 def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
-    """Recommend laptops using rule/content/hybrid with validations + business rules."""
-    # 1) Validate inputs
     errs = validate_prefs(prefs)
     if errs:
         st.error(" | ".join(errs))
         return pd.DataFrame()
 
-    # 2) Enforce soft business rules
     prefs2, notes = enforce_business_rules(prefs)
     if notes:
         st.info(" ".join(notes))
 
-    # 3) Filter candidates (hard constraints)
     mask = make_filter_mask(df, prefs2)
     view = df.loc[mask].copy()
     if view.empty:
         return view
 
-    # 4) Score
     if algo == "Rule-Based":
         scores = rule_based_scores(view, prefs2.get("use_case"))
     else:
-        # Guard: empty TF-IDF vocabulary
         if getattr(X, "shape", (0, 0))[1] == 0:
             st.warning("Content-based scoring unavailable (empty TF-IDF). Showing rule-based instead.")
             scores = rule_based_scores(view, prefs2.get("use_case"))
@@ -590,14 +585,12 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
             if algo == "Content-Based":
                 scores = sim
             else:
-                # Hybrid
                 rng = np.ptp(sim)
                 sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
                 rb = rule_based_scores(view, prefs2.get("use_case"))
                 a = float(prefs2.get("alpha", 0.6))
                 scores = a * sim_norm + (1 - a) * rb
 
-    # 5) Rank & return
     view["score"] = scores
     cols = [c for c in [
         "brand","series","model","year","price_myr",
@@ -753,45 +746,37 @@ prefs = dict(
 
 # --- Action: Recommend by Preferences ---
 recs = None
-if st.button("Recommend by Preferences"):
-    with st.spinner("Scoring..."):
-        recs = recommend_by_prefs(df, vec, X, prefs, algo, top_n)
+if st.button("Show laptops"):
+    with st.spinner("Finding good matches..."):
+        recs = recommend_by_prefs(df, vec, X, prefs, "Hybrid", results_count)
 
 if recs is not None:
     if recs.empty:
-        st.warning("No matching laptops found for your preferences.")
+        st.warning("No matching laptops found for your choices.")
     else:
-        st.dataframe(recs, width="stretch")
+        # use your nice card renderer
+        render_results(recs, style_bucket)
         
 DEV_MODE= True
 
 if DEV_MODE:
     with st.expander("Train/Test evaluation (Precision@K & Recall@K)"):
         test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
-        k_eval    = st.slider("K", 3, 20, 10, key="tt_k")
-        alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, float(alpha) if "alpha" in locals() else 0.6, 0.05, key="tt_alpha")
+        k_eval = st.slider("K", 3, 20, 10, key="tt_k")
+        alpha_tt = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="tt_alpha")
 
         if st.button("Run train/test evaluation"):
-            tr_df, te_df = split_df(df, test_size=test_size)
-            res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt)
+            tr_df, te_df = split_df(df, test_size=test_size, label_col=LABEL_COL)
+            res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt, label_col=LABEL_COL)
 
             st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
-            if "label_col" in df.columns:
+            if LABEL_COL in df.columns:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write("Train label counts")
-                    st.write(tr_df["label_col"].value_counts(dropna=False))
+                    st.write(tr_df[LABEL_COL].value_counts(dropna=False))
                 with col2:
                     st.write("Test label counts")
-                    st.write(te_df["label_col"].value_counts(dropna=False))
+                    st.write(te_df[LABEL_COL].value_counts(dropna=False))
 
             st.dataframe(res, width="stretch")
-            if not res.empty and res["precision@k"].notna().any():
-                st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
-                st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
-
-            st.download_button(
-                "Download evaluation (CSV)",
-                res.to_csv(index=False).encode("utf-8"),
-                file_name=f"eval_precision_recall_at_{k_eval}.csv",
-            )
