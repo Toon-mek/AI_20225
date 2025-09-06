@@ -216,6 +216,25 @@ def render_results(recs: pd.DataFrame, style_bucket: str):
             st.markdown("**Why it fits:** " + " • ".join(why))
             st.markdown("---")
 
+def unique_nums(df, col, *, round_to=None, as_int=False, add_zero=False):
+    s = pd.to_numeric(df.get(col), errors="coerce").dropna()
+    if round_to:
+        s = (s / round_to).round() * round_to
+    vals = sorted(s.unique())
+    if as_int:
+        vals = [int(v) for v in vals]
+    if add_zero and (not vals or vals[0] != 0):
+        vals = [0] + [v for v in vals if v != 0]
+    return vals
+
+def first_at_least(options, target):
+    if not options: 
+        return target
+    for v in options:
+        if v >= target:
+            return v
+    return options[-1]
+
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
@@ -723,18 +742,43 @@ with st.container():
 # Advanced (optional must-haves)
 with st.expander("Advanced filters (optional)", expanded=False):
     col1, col2 = st.columns(2)
+
+    # Build option lists from the dataset
+    ram_opts      = unique_nums(df, "ram_base_GB", as_int=True)
+    stor_opts     = unique_nums(df, "storage_primary_capacity_GB", as_int=True)
+    vram_opts     = unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)  # includes 0 = no requirement
+    year_opts     = unique_nums(df, "year", as_int=True)
+    refresh_opts  = unique_nums(df, "display_refresh_Hz", as_int=True)
+    batt_opts     = unique_nums(df, "battery_capacity_Wh", as_int=True, add_zero=True)
+    weight_opts   = unique_nums(df, "weight_kg", round_to=0.1)  # one-decimal steps from your data
+
     with col1:
-        min_ram = st.number_input("Min RAM (GB)", 0, 128, 8, 4)
-        min_storage = st.number_input("Min Storage (GB)", 0, 4096, 512, 128)
+        # Min RAM
+        default_ram = first_at_least(ram_opts, 8)
+        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=default_ram)
+        # Min Storage
+        default_stor = first_at_least(stor_opts, 512)
+        min_storage = st.select_slider("Min Storage (GB)", options=stor_opts, value=default_stor)
+        # Min VRAM (only show for Gaming)
         if style_bucket == "Gaming":
-            min_vram = st.number_input("Min GPU VRAM (GB)", 0, 24, min_vram_default, 1)
+            default_vram = first_at_least(vram_opts, 4)  # e.g., 0,4,6,8,12 → picks 4
+            min_vram = st.select_slider("Min GPU VRAM (GB)", options=vram_opts, value=default_vram)
         else:
-            min_vram = min_vram_default  # 0 for non-gaming by default
-        min_year = st.number_input("Min Release Year", 2015, 2025, 2019, 1)
+            min_vram = 0  # no VRAM requirement for non-gaming
+        # Min Year
+        default_year = first_at_least(year_opts, 2019)
+        min_year = st.select_slider("Min Release Year", options=year_opts, value=default_year)
+
     with col2:
-        max_weight = st.number_input("Max Weight (kg)", 0.0, 6.0, 3.0, 0.1)
-        min_refresh = st.number_input("Min Refresh (Hz)", 0, 360, 60, 30)
-        min_battery_wh = st.number_input("Min Battery (Wh)", 0, 120, 0, 5)
+        # Max Weight
+        default_weight = first_at_least(weight_opts, 3.0)
+        max_weight = st.select_slider("Max Weight (kg)", options=weight_opts, value=default_weight)
+        # Min Refresh
+        default_refresh = first_at_least(refresh_opts, 60)
+        min_refresh = st.select_slider("Min Refresh (Hz)", options=refresh_opts, value=default_refresh)
+        # Min Battery
+        default_batt = first_at_least(batt_opts, 0)
+        min_battery_wh = st.select_slider("Min Battery (Wh)", options=batt_opts, value=default_batt)
 
 # Build prefs for the engine
 prefs = dict(
