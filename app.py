@@ -717,7 +717,7 @@ with st.container():
     style_bucket = STYLE_TO_BUCKET.get(style_choice, "Student")
 
     # 3) Balance slider (replaces Hybrid α)
-    st.markdown("**Spec match?**")
+    st.markdown("Spec match")
     balance = st.slider("", 0.0, 1.0, 0.6, 0.05)
 
     # 4) How many to show (replaces Top N)
