@@ -753,9 +753,6 @@ with st.expander("Advanced filters (optional)", expanded=False):
     weight_opts   = unique_nums(df, "weight_kg", round_to=0.1)  # one-decimal steps from your data
 
     with col1:
-        # Min RAM
-        default_ram = first_at_least(ram_opts, 8)
-        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=default_ram)
         # Min Storage
         default_stor = first_at_least(stor_opts, 512)
         min_storage = st.select_slider("Min Storage (GB)", options=stor_opts, value=default_stor)
@@ -770,15 +767,12 @@ with st.expander("Advanced filters (optional)", expanded=False):
         min_year = st.select_slider("Min Release Year", options=year_opts, value=default_year)
 
     with col2:
-        # Max Weight
-        default_weight = first_at_least(weight_opts, 3.0)
-        max_weight = st.select_slider("Max Weight (kg)", options=weight_opts, value=default_weight)
+        # Min RAM
+        default_ram = first_at_least(ram_opts, 8)
+        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=default_ram)
         # Min Refresh
         default_refresh = first_at_least(refresh_opts, 60)
         min_refresh = st.select_slider("Min Refresh (Hz)", options=refresh_opts, value=default_refresh)
-        # Min Battery
-        default_batt = first_at_least(batt_opts, 0)
-        min_battery_wh = st.select_slider("Min Battery (Wh)", options=batt_opts, value=default_batt)
 
 # Build prefs for the engine
 prefs = dict(
@@ -787,7 +781,6 @@ prefs = dict(
     min_ram=min_ram, min_storage=min_storage, min_vram=min_vram,
     min_cpu_cores=4,  # or expose as a control if you like
     min_year=min_year, min_refresh=min_refresh,
-    min_battery_wh=min_battery_wh, max_weight=max_weight,
     alpha=balance
 )
 
