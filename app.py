@@ -111,6 +111,22 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         data = data.drop_duplicates(subset=["model"], keep="first")
 
     return data.reset_index(drop=True)
+
+BUCKETS = ["Gaming", "Student", "Creator", "Business"]
+
+def normalize_use_case(x: object) -> str:
+    t = str(x or "").lower()
+    if any(k in t for k in ["game"]):                                  # gaming, budget gaming, gamer, gaming/creator...
+        return "Gaming"
+    if any(k in t for k in ["creator", "content", "video", "design", "workstation", "pro"]):
+        return "Creator"
+    if any(k in t for k in ["student", "general", "productivity", "office",
+                            "ultrabook", "ultralight", "portable", "writer"]):
+        return "Student"
+    if any(k in t for k in ["business", "executive", "programming", "data"]):
+        return "Business"
+    return "Student"  # default fallback so it doesn’t drop out
+    
 # === Step 4A: Data validation helpers (place right after prepare_df) ===
 def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
     s = df.isna().sum()
@@ -182,17 +198,17 @@ def compute_query_sim(_vec: TfidfVectorizer, _X, query_text: str) -> np.ndarray:
     q = _vec.transform([query_text])
     return cosine_similarity(q, _X).ravel()
     
-def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
+def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42, label_col: str = "intended_use_case_norm"):
     """
-    Safer stratified split by 'intended_use_case'.
+    Safer stratified split by 'label_col '.
     - Collapses ultra-rare labels (<2 rows) to 'other'
     - If still infeasible for chosen test_size, falls back to non-stratified.
     """
-    if "intended_use_case" not in df.columns:
+    if "label_col " not in df.columns:
         tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
         return tr.reset_index(drop=True), te.reset_index(drop=True)
 
-    y = df["intended_use_case"].astype(str).str.strip()
+    y = df["label_col "].astype(str).str.strip()
     y = y.replace({"nan": "", "None": ""})
     y = y.mask(y.eq(""), "unknown")
 
@@ -221,7 +237,7 @@ def evaluate_precision_recall_at_k_train_test(
 ) -> pd.DataFrame:
     """
     Fit TF-IDF on TRAIN only; evaluate on TEST.
-    For each 'intended_use_case' label, build a preference query, score TEST with Hybrid,
+    For each 'label_col' label, build a preference query, score TEST with Hybrid,
     and compute Precision@K and Recall@K (scenario-level recall).
     """
     # Fit TF-IDF on TRAIN only
@@ -230,8 +246,8 @@ def evaluate_precision_recall_at_k_train_test(
     X_test  = vec.transform(test_df["spec_text"].fillna(""))
 
     # Labels (scenarios) to evaluate
-    if "intended_use_case" in train_df and train_df["intended_use_case"].dropna().size:
-        labels = sorted({str(x).strip() for x in train_df["intended_use_case"].dropna() if str(x).strip()})
+    if "label_col" in train_df and train_df["label_col"].dropna().size:
+        labels = sorted({str(x).strip() for x in train_df["label_col"].dropna() if str(x).strip()})
     else:
         labels = ["Gaming", "Student", "Creator", "Business"]
 
@@ -251,9 +267,18 @@ def evaluate_precision_recall_at_k_train_test(
 
         # Budget mask on TEST
         if price_te is not None:
-            mask = (price_te.between(prefs["budget_min"], prefs["budget_max"], inclusive="both")) | price_te.isna()
-        else:
-            mask = pd.Series(True, index=test_df.index)
+    price_clean = price_te.dropna()
+    if len(price_clean) >= 5:
+        lo = float(price_clean.quantile(0.05))
+        hi = float(price_clean.quantile(0.95))
+    elif len(price_clean) >= 1:
+        lo = float(price_clean.min())
+        hi = float(price_clean.max())
+    else:
+        lo, hi = 0.0, 20000.0
+    mask = price_te.between(lo, hi, inclusive="both") | price_te.isna()
+else:
+    mask = pd.Series(True, index=test_df.index)
 
         view = test_df.loc[mask].copy()
         if view.empty:
@@ -573,6 +598,11 @@ except Exception as e:
 
 df = prepare_df(raw)
 st.caption(f"{len(df)} laptops loaded from {'local file' if Path(DATA_PATH).exists() else 'Google Drive (cached)'}")
+LABEL_COL = "intended_use_case_norm"
+if "intended_use_case" in df.columns:
+    df[LABEL_COL] = df["intended_use_case"].apply(normalize_use_case)
+else:
+    df[LABEL_COL] = "Student"
 
 with st.expander("📋 Data validation & data quality checks", expanded=False):
     issues = []
@@ -650,10 +680,8 @@ with col_a:
     price_max = int(min(20000, pd.to_numeric(df["price_myr"], errors="coerce").max(skipna=True))) if "price_myr" in df else 20000
     budget = st.slider("Budget (MYR)", 0, max(price_max, 10000),
                        (max(price_min, 1500), min(price_max, 8000)), 100)
-    use_options = sorted({str(x) for x in df["intended_use_case"].dropna() if str(x).strip()}) \
-                  if "intended_use_case" in df and df["intended_use_case"].dropna().size else \
-                  ["Student","Gaming","Creator","Business","Programming"]
-    use_case = st.selectbox("Use case", use_options)
+   use_options = sorted({str(x) for x in df[LABEL_COL].dropna() if str(x).strip()})
+   use_case = st.selectbox("Use case", use_options or BUCKETS)
     algo = st.selectbox("Algorithm", ["Hybrid","Content-Based","Rule-Based"])
 with col_b:
     min_ram = st.number_input("Min RAM (GB)", 0, 128, 8, 4)
@@ -706,14 +734,14 @@ if DEV_MODE:
             res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt)
 
             st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
-            if "intended_use_case" in df.columns:
+            if "label_col" in df.columns:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write("Train label counts")
-                    st.write(tr_df["intended_use_case"].value_counts(dropna=False))
+                    st.write(tr_df["label_col"].value_counts(dropna=False))
                 with col2:
                     st.write("Test label counts")
-                    st.write(te_df["intended_use_case"].value_counts(dropna=False))
+                    st.write(te_df["label_col"].value_counts(dropna=False))
 
             st.dataframe(recs, width="stretch")
             if not res.empty and res["precision@k"].notna().any():
