@@ -106,6 +106,51 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         data = data.drop_duplicates(subset=["model"], keep="first")
 
     return data.reset_index(drop=True)
+# === Step 4A: Data validation helpers (place right after prepare_df) ===
+def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
+    s = df.isna().sum()
+    out = pd.DataFrame({"column": s.index, "nulls": s.values})
+    out["pct"] = (out["nulls"] / max(len(df), 1)) * 100
+    return out.sort_values("nulls", ascending=False).reset_index(drop=True)
+
+def range_checks(df: pd.DataFrame) -> list[str]:
+    msgs = []
+
+    # year sanity
+    if "year" in df.columns:
+        y = pd.to_numeric(df["year"], errors="coerce")
+        bad = ((y < 2010) | (y > 2026)) & y.notna()
+        if bad.any():
+            msgs.append(f"{int(bad.sum())} rows with suspicious year (<2010 or >2026).")
+
+    # price sanity
+    if "price_myr" in df.columns:
+        p = pd.to_numeric(df["price_myr"], errors="coerce")
+        if (p < 0).sum() > 0:
+            msgs.append(f"{int((p < 0).sum())} rows with negative price.")
+        if p.notna().sum() > 0:
+            qhi = p.quantile(0.995)
+            if (p > qhi).sum() > 0:
+                msgs.append(f"{int((p > qhi).sum())} extreme price outliers (>99.5th percentile).")
+
+    # numeric spec sanity
+    bounds = [
+        ("ram_base_GB", 2, 128),
+        ("gpu_vram_GB", 0, 48),
+        ("cpu_cores", 1, 64),
+        ("storage_primary_capacity_GB", 64, 8192),
+        ("display_refresh_Hz", 30, 360),
+        ("weight_kg", 0.5, 6.0),
+    ]
+    for col, lo, hi in bounds:
+        if col in df.columns:
+            v = pd.to_numeric(df[col], errors="coerce")
+            bad = ((v < lo) | (v > hi)) & v.notna()
+            if bad.any():
+                msgs.append(f"{int(bad.sum())} values in '{col}' outside [{lo}, {hi}].")
+
+    return msgs
+
 
 # ---------- Validations & business rules ----------
 def validate_prefs(prefs: dict) -> list[str]:
@@ -535,6 +580,31 @@ except Exception as e:
 
 df = prepare_df(raw)
 st.caption(f"{len(df)} laptops loaded from {'local file' if Path(DATA_PATH).exists() else 'Google Drive (cached)'}")
+
+with st.expander("📋 Data validation & data quality checks", expanded=False):
+    issues = []
+
+    missing_in_raw = [c for c in EXPECTED if c not in raw.columns]
+    if missing_in_raw:
+        issues.append(f"Missing in source file: {missing_in_raw}")
+
+    key_cols = [c for c in ["brand", "series", "model", "year"] if c in df.columns]
+    if key_cols:
+        dup_count = df.duplicated(subset=key_cols, keep=False).sum()
+        if dup_count > 0:
+            issues.append(f"{int(dup_count)} duplicate rows by {key_cols}.")
+
+    nulls = summarize_nulls(df)
+    if (nulls["nulls"] > 0).any():
+        st.write("**Null counts (post-clean):**")
+        st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
+
+    issues += range_checks(df)
+
+    if issues:
+        st.error("• " + "\n• ".join(issues))
+    else:
+        st.success("No data quality issues detected.")
 
 # Build TF-IDF space
 vec, X = build_tfidf(df["spec_text"])
