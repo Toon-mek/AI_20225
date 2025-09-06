@@ -136,14 +136,12 @@ def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
 
 def range_checks(df: pd.DataFrame) -> list[str]:
     msgs = []
-
     # year sanity
     if "year" in df.columns:
         y = pd.to_numeric(df["year"], errors="coerce")
         bad = ((y < 2010) | (y > 2026)) & y.notna()
         if bad.any():
             msgs.append(f"{int(bad.sum())} rows with suspicious year (<2010 or >2026).")
-
     # price sanity
     if "price_myr" in df.columns:
         p = pd.to_numeric(df["price_myr"], errors="coerce")
@@ -153,7 +151,6 @@ def range_checks(df: pd.DataFrame) -> list[str]:
             qhi = p.quantile(0.995)
             if (p > qhi).sum() > 0:
                 msgs.append(f"{int((p > qhi).sum())} extreme price outliers (>99.5th percentile).")
-
     # numeric spec sanity
     bounds = [
         ("ram_base_GB", 2, 128),
@@ -169,8 +166,59 @@ def range_checks(df: pd.DataFrame) -> list[str]:
             bad = ((v < lo) | (v > hi)) & v.notna()
             if bad.any():
                 msgs.append(f"{int(bad.sum())} values in '{col}' outside [{lo}, {hi}].")
-
     return msgs
+
+STYLE_CHOICES = ["Business-look", "Gaming-look", "Creator-look"]
+STYLE_TO_BUCKET = {"Business-look": "Business", "Gaming-look": "Gaming", "Creator-look": "Creator"}
+
+def why_this(row: pd.Series, style_bucket: str) -> list[str]:
+    bullets = []
+    w = pd.to_numeric(row.get("weight_kg"), errors="coerce")
+    bat = pd.to_numeric(row.get("battery_capacity_Wh"), errors="coerce")
+    hz = pd.to_numeric(row.get("display_refresh_Hz"), errors="coerce")
+    vram = pd.to_numeric(row.get("gpu_vram_GB"), errors="coerce")
+    ram = pd.to_numeric(row.get("ram_base_GB"), errors="coerce")
+    res = str(row.get("display_resolution") or "")
+
+    # Always-on student-friendly hints
+    if pd.notna(w) and w <= 1.5: bullets.append("lightweight")
+    if pd.notna(bat) and bat >= 50: bullets.append("long battery life")
+
+    # Style nudges
+    sb = (style_bucket or "").lower()
+    if sb == "gaming":
+        if pd.notna(hz) and hz >= 120: bullets.append(f"{int(hz)} Hz display")
+        if pd.notna(vram) and vram >= 6: bullets.append(f"{int(vram)} GB VRAM")
+    elif sb == "creator":
+        if pd.notna(ram) and ram >= 16: bullets.append(f"{int(ram)} GB RAM")
+        if any(x in res for x in ["2560","2880","3000","3200","3840","4K"]): bullets.append("high-res screen")
+    elif sb == "business":
+        if pd.notna(w) and w <= 1.3: bullets.append("ultra-portable")
+        if pd.notna(bat) and bat >= 60: bullets.append("all-day battery")
+
+    # Clean up & cap
+    bullets = [b for b in bullets if b]
+    return bullets[:3] or ["balanced for everyday study"]
+
+def render_results(recs: pd.DataFrame, style_bucket: str):
+    for i, r in recs.iterrows():
+        title = f"**{r.get('brand','')} {r.get('series','')} {r.get('model','')}**"
+        price = r.get("price_myr")
+        price_txt = f"RM {int(price):,}" if pd.notna(price) else "Price N/A"
+        specs = f"CPU: {r.get('cpu_brand','')} {r.get('cpu_model','')} | GPU: {r.get('gpu_brand','')} {r.get('gpu_model','')}"
+        spec2 = f"RAM/Storage: {r.get('ram_base_GB','?')}GB / {r.get('storage_primary_capacity_GB','?')}GB {r.get('storage_primary_type','')}"
+        disp = f"Display: {r.get('display_size_in','?')}-in {r.get('display_resolution','')} {r.get('display_refresh_Hz','')}Hz"
+        why = why_this(r, style_bucket)
+
+        with st.container():
+            st.markdown(title)
+            st.caption(price_txt)
+            st.write(specs)
+            st.write(spec2)
+            st.write(disp)
+            st.markdown("**Why it fits:** " + " • ".join(why))
+            st.markdown("---")
+
 
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
@@ -662,36 +710,45 @@ if search_term:
                     st.markdown("---")
 
 # -------- Preference block (rule/content/hybrid) --------
-st.write("## Recommend by Preferences")
-col_a, col_b = st.columns(2)
-with col_a:
+st.write("## Find laptops for school")
+
+with st.container():
+    # 1) Budget
     price_min = int(max(0, pd.to_numeric(df["price_myr"], errors="coerce").min(skipna=True))) if "price_myr" in df else 0
     price_max = int(min(20000, pd.to_numeric(df["price_myr"], errors="coerce").max(skipna=True))) if "price_myr" in df else 20000
     budget = st.slider("Budget (MYR)", 0, max(price_max, 10000),
                        (max(price_min, 1500), min(price_max, 8000)), 100)
 
-    use_options = sorted({str(x) for x in df[LABEL_COL].dropna() if str(x).strip()})
-    use_case = st.selectbox("Use case", use_options or BUCKETS)
-    algo = st.selectbox("Algorithm", ["Hybrid","Content-Based","Rule-Based"])
-with col_b:
-    min_ram = st.number_input("Min RAM (GB)", 0, 128, 8, 4)
-    min_storage = st.number_input("Min Storage (GB)", 0, 4096, 512, 128)
-    min_vram = st.number_input("Min GPU VRAM (GB)", 0, 24, 0, 2)
-    min_cores = st.number_input("Min CPU Cores", 0, 32, 4, 1)
-    min_year = st.number_input("Min Release Year", 2015, 2025, 2019, 1)
-    min_refresh = st.number_input("Min Refresh (Hz)", 0, 360, 60, 30)
-    min_battery_wh = st.number_input("Min Battery (Wh)", 0, 120, 0, 5)
-    max_weight = st.number_input("Max Weight (kg)", 0.0, 6.0, 3.0, 0.1)
+    # 2) Style
+    style_choice = st.radio("Preferred style", STYLE_CHOICES, horizontal=True)
+    style_bucket = STYLE_TO_BUCKET.get(style_choice, "Student")
 
-alpha = st.slider("Hybrid α (Content weight)", 0.0, 1.0, 0.6, 0.05)
-top_n = st.slider("Top N", 3, 30, 10)
+    # 3) Balance slider (replaces Hybrid α)
+    st.markdown("**What should we prioritize?**  \nStudent-friendly ⟵ **balance** ⟶ Spec match")
+    balance = st.slider("", 0.0, 1.0, 0.6, 0.05)
 
+    # 4) How many to show (replaces Top N)
+    results_count = st.slider("How many results to show?", 3, 30, 10, 1)
+
+# Advanced (optional must-haves)
+with st.expander("Advanced filters (optional)", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        min_ram = st.number_input("Min RAM (GB)", 0, 128, 8, 4)
+        min_storage = st.number_input("Min Storage (GB)", 0, 4096, 512, 128)
+        min_year = st.number_input("Min Release Year", 2015, 2025, 2019, 1)
+    with col2:
+        max_weight = st.number_input("Max Weight (kg)", 0.0, 6.0, 3.0, 0.1)
+        min_refresh = st.number_input("Min Refresh (Hz)", 0, 360, 60, 30)
+        min_battery_wh = st.number_input("Min Battery (Wh)", 0, 120, 0, 5)
+
+# Build prefs for the engine
 prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
-    use_case=use_case,
-    min_ram=min_ram, min_storage=min_storage, min_vram=min_vram, min_cpu_cores=min_cores,
+    use_case=style_bucket,   # map to our 4 buckets
+    min_ram=min_ram, min_storage=min_storage, min_vram=0, min_cpu_cores=4,
     min_year=min_year, min_refresh=min_refresh, min_battery_wh=min_battery_wh, max_weight=max_weight,
-    alpha=alpha
+    alpha=balance           # the Balance slider
 )
 
 # --- Action: Recommend by Preferences ---
