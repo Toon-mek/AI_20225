@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,7 +7,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
-# =========================
 # Config & Page
 st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
 
@@ -335,15 +333,18 @@ def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int 
     if not idxs:
         st.write("Model not found.")
         return pd.DataFrame()
-i = idxs[0]
-# Guard: empty TF-IDF vocabulary
-if getattr(X, "shape", (0, 0))[1] == 0:
-    st.warning("Similarity is unavailable (empty TF-IDF vocabulary). Add more text features or rows.")
-    return pd.DataFrame()
 
-sim = compute_row_sim(X, i)
+    i = idxs[0]
+
+    # Guard: empty TF-IDF vocabulary
+    if getattr(X, "shape", (0, 0))[1] == 0:
+        st.warning("Similarity is unavailable (empty TF-IDF vocabulary). Add more text features or rows.")
+        return pd.DataFrame()
+
+    sim = compute_row_sim(X, i)
     order = np.argsort(-sim)
     order = [j for j in order if j != i][:top_n]
+
     out = df.iloc[order].copy()
     out["similarity"] = sim[order]
     return out
