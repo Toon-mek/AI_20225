@@ -10,16 +10,13 @@ from sklearn.model_selection import train_test_split
 
 # =========================
 # Config & Page
-# =========================
 st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
 
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 DRIVE_ID = "18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4"
 GID = "418897947" 
 
-# =========================
 # Data loading
-# =========================
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_sheet_csv(output="/tmp/laptops.csv"):
     url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
@@ -34,9 +31,7 @@ def load_dataset() -> pd.DataFrame:
     downloaded = download_sheet_csv("/tmp/laptops.csv")
     return pd.read_csv(downloaded, low_memory=False)
 
-# =========================
 # Prep / Utilities
-# =========================
 EXPECTED = [
     "brand","series","model","year",
     "cpu_brand","cpu_family","cpu_model","cpu_cores",
@@ -105,9 +100,7 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return data.reset_index(drop=True)
 
-# =========================
 # Content features (TF-IDF)
-# =========================
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
@@ -151,7 +144,6 @@ def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
     except ValueError:
         tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
     return tr.reset_index(drop=True), te.reset_index(drop=True)
-
 
 def evaluate_precision_recall_at_k_train_test(
     train_df: pd.DataFrame,
@@ -221,20 +213,16 @@ def evaluate_precision_recall_at_k_train_test(
         matched = (truth_labels == lab.lower()).sum()
         precision = matched / max(k, 1)
         recall = 1.0 if matched > 0 else 0.0
-
         results.append({
             "scenario": lab,
             "matched@k": int(matched),
             "precision@k": round(precision, 3),
             "recall@k": round(recall, 3),
         })
-
     return pd.DataFrame(results)
 
 
-# =========================
 # Rule-based scoring
-# =========================
 def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
     def nz(col, default=0.0):
         return pd.to_numeric(view.get(col, default), errors="coerce").fillna(default).astype(float)
@@ -272,9 +260,7 @@ def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
         s += 0.14 * np.clip((ram - 16) / 16.0, 0, 1)
     return np.clip(s, 0, 1)
 
-# =========================
 # Recommenders
-# =========================
 def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int = 5):
     idxs = df.index[df["model"].astype(str).str.lower() == selected_model.lower()].tolist()
     if not idxs:
@@ -341,10 +327,7 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
     ] if c in view.columns]
     return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
 
-# =========================
-# UI (similar style to your song app)
-# =========================
-# Simple CSS accent
+# UI
 st.markdown("""
 <style>
 h1, h2, h3 { font-family: 'Helvetica Neue', sans-serif; }
@@ -358,7 +341,7 @@ with st.sidebar:
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
-st.title("💻 Laptop Recommender — Search, Similar, and Preferences")
+st.title("💻 Laptop Recommender")
 
 # Load + prep
 try:
@@ -462,8 +445,6 @@ if recs is not None:
             recs.to_csv(index=False).encode("utf-8"),
             file_name=f"laptop_recommendations_{algo.lower()}.csv",
         )
-
-DEV_MODE = True  # set to False to hide this panel from normal users
 
 if DEV_MODE:
     with st.expander("Train/Test evaluation (Precision@K & Recall@K)"):
