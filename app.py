@@ -761,7 +761,7 @@ with st.container():
     min_vram_default = 4 if style_bucket == "Gaming" else 0
 
     # 3) Balance slider (replaces Hybrid α)
-    balance = st.slider("Spec match", 1.0, 0.6, 0.05)
+    balance = st.slider("Spec match", min_value=0.1, max_value=1.0, value=0.6, step=0.1)
 
     # 4) How many to show (replaces Top N)
     results_count = st.slider("How many results to show?", 3, 30, 10, 1)
