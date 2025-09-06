@@ -614,15 +614,17 @@ prefs = dict(
 )
 
 recs = None
+# --- Action: Recommend by Preferences ---
+recs = None
 if st.button("Recommend by Preferences"):
     with st.spinner("Scoring..."):
         recs = recommend_by_prefs(df, vec, X, prefs, algo, top_n)
 
 if recs is not None:
     if recs.empty:
-        st.write("No matching laptops found for your preferences.")
+        st.warning("No matching laptops found for your preferences.")
     else:
-        st.dataframe(recs, width="stretch")
+        st.dataframe(recs, width="stretch")  # <- replaces deprecated use_container_width
         st.download_button(
             "Download results (CSV)",
             recs.to_csv(index=False).encode("utf-8"),
@@ -651,7 +653,7 @@ if DEV_MODE:
                     st.write("Test label counts")
                     st.write(te_df["intended_use_case"].value_counts(dropna=False))
 
-            st.dataframe(res, width=True)
+            st.dataframe(res, width="stretch")
             if not res.empty and res["precision@k"].notna().any():
                 st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
                 st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
