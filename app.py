@@ -590,7 +590,7 @@ with st.expander("📋 Data validation & data quality checks", expanded=False):
     nulls = summarize_nulls(df)
     if (nulls["nulls"] > 0).any():
         st.write("**Null counts (post-clean):**")
-        st.dataframe(nulls[nulls["nulls"] > 0], use_container_width=True)
+        st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
 
     issues += range_checks(df)
 
@@ -686,7 +686,7 @@ if recs is not None:
     if recs.empty:
         st.warning("No matching laptops found for your preferences.")
     else:
-        st.dataframe(recs, use_container_width=True)  # <- replaces deprecated use_container_width
+        st.dataframe(recs, width="stretch")  # <- replaces deprecated use_container_width
         st.download_button(
             "Download results (CSV)",
             recs.to_csv(index=False).encode("utf-8"),
@@ -715,7 +715,7 @@ if DEV_MODE:
                     st.write("Test label counts")
                     st.write(te_df["intended_use_case"].value_counts(dropna=False))
 
-            st.dataframe(res, use_container_width=True)
+            st.dataframe(recs, width="stretch")
             if not res.empty and res["precision@k"].notna().any():
                 st.write(f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f}")
                 st.write(f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f}")
