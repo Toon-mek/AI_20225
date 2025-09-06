@@ -198,23 +198,39 @@ def why_this(row: pd.Series, style_bucket: str) -> list[str]:
     return bullets[:3] or ["balanced for everyday study"]
 
 def render_results(recs: pd.DataFrame, style_bucket: str):
-    for i, r in recs.iterrows():
-        title = f"**{r.get('brand','')} {r.get('series','')} {r.get('model','')}**"
-        price = r.get("price_myr")
-        price_txt = f"RM {int(price):,}" if pd.notna(price) else "Price N/A"
-        specs = f"CPU: {r.get('cpu_brand','')} {r.get('cpu_model','')} | GPU: {r.get('gpu_brand','')} {r.get('gpu_model','')}"
-        spec2 = f"RAM/Storage: {r.get('ram_base_GB','?')}GB / {r.get('storage_primary_capacity_GB','?')}GB {r.get('storage_primary_type','')}"
-        disp = f"Display: {r.get('display_size_in','?')}-in {r.get('display_resolution','')} {r.get('display_refresh_Hz','')}Hz"
-        why = why_this(r, style_bucket)
+    for i, row in recs.iterrows():
+        # Title with numbering
+        title = f"### {i+1}. {row.get('brand','')} {row.get('series','')} {row.get('model','')}"
+        st.markdown(title)
+        # Price
+        price = pd.to_numeric(row.get("price_myr"), errors="coerce")
+        price_txt = f"{int(price):,}" if pd.notna(price) else "Unknown"
+        st.markdown(f"*Price (MYR):* {price_txt}")
 
-        with st.container():
-            st.markdown(title)
-            st.caption(price_txt)
-            st.write(specs)
-            st.write(spec2)
-            st.write(disp)
-            st.markdown("**Why it fits:** " + " • ".join(why))
-            st.markdown("---")
+        # Spec lines (match your screenshot)
+        st.markdown(
+            f"*CPU:* {row.get('cpu_brand','')} {row.get('cpu_family','')} {row.get('cpu_model','')} | "
+            f"*Cores:* {row.get('cpu_cores','')}"
+        )
+        st.markdown(
+            f"*GPU:* {row.get('gpu_brand','')} {row.get('gpu_model','')} | "
+            f"*VRAM:* {row.get('gpu_vram_GB','0')} GB"
+        )
+        st.markdown(
+            f"*RAM:* {row.get('ram_base_GB','?')} GB {row.get('ram_type','')} | "
+            f"*Storage:* {row.get('storage_primary_capacity_GB','?')} GB {row.get('storage_primary_type','')}"
+        )
+        st.markdown(
+            f"*Display:* {row.get('display_size_in','?')}-inch {row.get('display_resolution','')} "
+            f"{row.get('display_refresh_Hz','')}Hz {row.get('display_panel','')}"
+        )
+        # Keep your rationale
+        why = why_this(row, style_bucket)
+        st.markdown("**Why it fits:** " + " • ".join(why))
+        # Full row if needed
+        with st.expander("Show/Hide more specs"):
+            st.write(row.to_frame().T)
+        st.markdown("---")
 
 def unique_nums(df, col, *, round_to=None, as_int=False, add_zero=False):
     s = pd.to_numeric(df.get(col), errors="coerce").dropna()
