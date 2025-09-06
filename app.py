@@ -308,14 +308,23 @@ def split_df(df: pd.DataFrame,test_size: float = 0.2, random_state: int = 42, la
         tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
     return tr.reset_index(drop=True), te.reset_index(drop=True)
 
-def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: pd.DataFrame, k: int = 10,  alpha: float = 0.6, label_col: str = "intended_use_case_norm") -> pd.DataFrame:
+def evaluate_precision_recall_at_k_train_test(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    k: int = 10,
+    alpha: float = 0.6,
+    label_col: str = "intended_use_case_norm",
+) -> pd.DataFrame:
     """
-    Fit TF-IDF on TRAIN only; evaluate on TEST using Hybrid/Content similarity to a scenario query.
+    Fit TF-IDF on TRAIN only; evaluate on TEST.
+    No UI variables are used here. Budgets are derived from TEST price distribution.
     """
+    # Fit on TRAIN, transform TEST
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
     X_train = vec.fit_transform(train_df["spec_text"].fillna(""))
     X_test  = vec.transform(test_df["spec_text"].fillna(""))
 
+    # Labels to evaluate
     if label_col in train_df.columns and train_df[label_col].dropna().size:
         labels = sorted({str(x).strip() for x in train_df[label_col].dropna() if str(x).strip()})
     else:
@@ -323,9 +332,9 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
 
     price_te = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
     results = []
-    
+
     for lab in labels:
-        # Budget bounds from TEST set with safe fallbacks
+        # Budget bounds from TEST set (robust to tiny sets)
         price_clean = price_te.dropna()
         if len(price_clean) >= 5:
             lo = float(price_clean.quantile(0.05))
@@ -336,29 +345,27 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
         else:
             lo, hi = 0.0, 20000.0
 
+        # Scenario prefs (independent of the UI)
         prefs = dict(
-            budget_min=budget[0], budget_max=budget[1],
-            use_case=style_bucket,          # from the radio
-            min_vram_default = 4 if style_bucket == "Gaming" else 0,
-            min_ram=min_ram,
-            min_storage=min_storage,
+            use_case=lab,
+            budget_min=lo, budget_max=hi,
+            min_ram=8,
+            min_storage=512,
             min_vram=0,
             min_cpu_cores=4,
-            min_year=min_year,
-            min_refresh=min_refresh,
-            min_battery_wh=min_battery_wh,
-            max_weight=max_weight,
-            alpha=balance                   # from the balance slider
+            min_year=2018,
+            min_refresh=60,
+            alpha=alpha,
         )
 
-        # Budget mask on TEST (properly indented)
+        # Keep only items in budget range
         mask = price_te.between(lo, hi, inclusive="both") | price_te.isna()
         view = test_df.loc[mask].copy()
         if view.empty:
             results.append({"scenario": lab, "matched@k": 0, "precision@k": np.nan, "recall@k": np.nan})
             continue
 
-        # Content similarity on TEST using TRAIN-fit vectorizer
+        # Content similarity: TRAIN-fit vectorizer on TEST items
         query_text = build_pref_query(prefs)
         q = vec.transform([query_text])
         sim_all = cosine_similarity(q, X_test).ravel()
@@ -374,7 +381,7 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
 
         topk = view.assign(score=scores).sort_values("score", ascending=False).head(k)
 
-        # Scenario-level match uses the bucketed label if present
+        # Did we place at least one correct label in top-K?
         truth_labels = topk.get(label_col, topk.get("intended_use_case")).astype(str).str.lower()
         matched = (truth_labels == lab.lower()).sum()
         precision = matched / max(k, 1)
@@ -386,8 +393,8 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
             "precision@k": round(precision, 3),
             "recall@k": round(recall, 3),
         })
-    return pd.DataFrame(results)
 
+    return pd.DataFrame(results)
 
 # Rule-based scoring
 def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
