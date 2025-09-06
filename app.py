@@ -292,7 +292,8 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
 
     price_te = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
     results = []
-
+    
+#Customization Slidebar
     for lab in labels:
         # Budget bounds from TEST set with safe fallbacks
         price_clean = price_te.dropna()
@@ -308,6 +309,7 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
         prefs = dict(
             budget_min=budget[0], budget_max=budget[1],
             use_case=style_bucket,          # from the radio
+            min_vram_default = 4 if style_bucket == "Gaming" else 0
             min_ram=min_ram,
             min_storage=min_storage,
             min_vram=0,
@@ -728,6 +730,10 @@ with st.expander("Advanced filters (optional)", expanded=False):
     with col1:
         min_ram = st.number_input("Min RAM (GB)", 0, 128, 8, 4)
         min_storage = st.number_input("Min Storage (GB)", 0, 4096, 512, 128)
+        if style_bucket == "Gaming":
+            min_vram = st.number_input("Min GPU VRAM (GB)", 0, 24, min_vram_default, 1)
+        else:
+            min_vram = min_vram_default  # keep 0 when not shown
         min_year = st.number_input("Min Release Year", 2015, 2025, 2019, 1)
     with col2:
         max_weight = st.number_input("Max Weight (kg)", 0.0, 6.0, 3.0, 0.1)
@@ -737,10 +743,12 @@ with st.expander("Advanced filters (optional)", expanded=False):
 # Build prefs for the engine
 prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
-    use_case=style_bucket,   # map to our 4 buckets
-    min_ram=min_ram, min_storage=min_storage, min_vram=0, min_cpu_cores=4,
-    min_year=min_year, min_refresh=min_refresh, min_battery_wh=min_battery_wh, max_weight=max_weight,
-    alpha=balance           # the Balance slider
+    use_case=style_bucket,
+    min_ram=min_ram, min_storage=min_storage, min_vram=min_vram,
+    min_cpu_cores=4,  # or expose as a control if you like
+    min_year=min_year, min_refresh=min_refresh,
+    min_battery_wh=min_battery_wh, max_weight=max_weight,
+    alpha=balance
 )
 
 # --- Action: Recommend by Preferences ---
