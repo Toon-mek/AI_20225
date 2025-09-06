@@ -590,7 +590,7 @@ with st.expander("📋 Data validation & data quality checks", expanded=False):
     nulls = summarize_nulls(df)
     if (nulls["nulls"] > 0).any():
         st.write("**Null counts (post-clean):**")
-        st.dataframe(nulls[nulls["nulls"] > 0], width="True")
+        st.dataframe(nulls[nulls["nulls"] > 0], use_container_width=True)
 
     issues += range_checks(df)
 
