@@ -378,56 +378,137 @@ def build_pref_query(prefs: dict) -> str:
     if prefs.get("max_weight"): parts += [f"WT{prefs['max_weight']}KG"]
     return " ".join(parts)
 
-def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
+# ---------- Validations & business rules for preferences ----------
+def validate_prefs(prefs: dict) -> list[str]:
+    """Return a list of error messages; empty list means OK."""
+    errs = []
+    # numbers must be non-negative
+    for k in ["budget_min","budget_max","min_ram","min_storage","min_vram",
+              "min_cpu_cores","min_refresh","min_battery_wh","max_weight"]:
+        if k in prefs and prefs[k] is not None:
+            try:
+                v = float(prefs[k])
+                if v < 0:
+                    errs.append(f"{k} must be ≥ 0.")
+            except Exception:
+                errs.append(f"{k} must be a number.")
+
+    # budget range
+    if "budget_min" in prefs and "budget_max" in prefs:
+        try:
+            if float(prefs["budget_min"]) > float(prefs["budget_max"]):
+                errs.append("budget_min cannot be greater than budget_max.")
+        except Exception:
+            pass
+
+    # sensible year
+    if prefs.get("min_year") is not None:
+        try:
+            y = int(prefs["min_year"])
+            if y < 2010 or y > 2035:
+                errs.append("min_year looks out of range (2010–2035).")
+        except Exception:
+            errs.append("min_year must be an integer.")
+    return errs
+
+
+def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
     """
-    Recommend laptops using rule/content/hybrid with validations and business rules.
+    Adjust questionable inputs to sensible values; return (adjusted_prefs, notes).
     """
-    # 1) Validate inputs
-    errs = validate_prefs(prefs)
-    if errs:
-        st.error(" | ".join(errs))
-        return pd.DataFrame()
+    p = dict(prefs)  # copy
+    notes = []
 
-    # 2) Enforce business rules (soft constraints)
-    prefs2, notes = enforce_business_rules(prefs)
-    if notes:
-        st.info(" ".join(notes))
+    # Round RAM to nearest 4 GB (up)
+    if p.get("min_ram") is not None:
+        try:
+            r = int(np.ceil(float(p["min_ram"]) / 4.0) * 4)
+            if r != p["min_ram"]:
+                notes.append(f"Rounded min_ram to {r} GB.")
+            p["min_ram"] = r
+        except Exception:
+            pass
 
-    # 3) Filter candidates by numeric constraints + budget
-    mask = make_filter_mask(df, prefs2)
-    view = df.loc[mask].copy()
-    if view.empty:
-        return view
+    # Gaming defaults
+    u = str(p.get("use_case") or "").lower()
+    if u in ("gaming","gamer","budget gaming"):
+        if p.get("min_vram") is None or float(p["min_vram"]) < 4:
+            p["min_vram"] = 4
+            notes.append("Set min_vram to 4 GB for gaming.")
+        if p.get("min_refresh") is None or float(p["min_refresh"]) < 120:
+            p["min_refresh"] = 120
+            notes.append("Set min_refresh to 120 Hz for gaming.")
 
-    # 4) Score
-    if algo == "Rule-Based":
-        scores = rule_based_scores(view, prefs2.get("use_case"))
-    else:
-        query = build_pref_query(prefs2)
-        sim_all = compute_query_sim(vec, X, query)   # keep using your compute_query_sim
-        sim = sim_all[mask.values]
+    # Weight sanity
+    if p.get("max_weight") is not None:
+        try:
+            w = float(p["max_weight"])
+            if w < 0.8:
+                p["max_weight"] = 0.8
+                notes.append("Raised max_weight to 0.8 kg (very light).")
+            elif w > 6.0:
+                p["max_weight"] = 6.0
+                notes.append("Capped max_weight at 6.0 kg.")
+        except Exception:
+            pass
 
-        if algo == "Content-Based":
-            scores = sim
-        else:
-            rng = np.ptp(sim)
-            sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
-            rb = rule_based_scores(view, prefs2.get("use_case"))
-            a = float(prefs2.get("alpha", 0.6))
-            scores = a * sim_norm + (1 - a) * rb
+    # Budget sanity
+    if p.get("budget_min") is not None and p.get("budget_max") is not None:
+        try:
+            lo, hi = float(p["budget_min"]), float(p["budget_max"])
+            if lo > hi:
+                p["budget_min"], p["budget_max"] = hi, lo
+                notes.append("Swapped budget_min and budget_max.")
+        except Exception:
+            pass
 
-    # 5) Rank & return
-    view["score"] = scores
-    cols = [c for c in [
-        "brand","series","model","year","price_myr",
-        "cpu_brand","cpu_family","cpu_model","cpu_cores",
-        "gpu_brand","gpu_model","gpu_vram_GB",
-        "ram_base_GB","ram_type",
-        "storage_primary_type","storage_primary_capacity_GB",
-        "display_size_in","display_resolution","display_refresh_Hz","display_panel",
-        "battery_capacity_Wh","weight_kg","os","intended_use_case","score"
-    ] if c in view.columns]
-    return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
+    return p, notes
+
+def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
+    """
+    Build a boolean mask for hard filters. Missing values in the data do NOT
+    exclude rows (i.e., they pass the filter).
+    """
+    n = len(df)
+    mask = pd.Series(True, index=df.index)
+
+    def ge(col, v):
+        s = pd.to_numeric(df.get(col), errors="coerce")
+        return (s >= float(v)) | s.isna()
+
+    def le(col, v):
+        s = pd.to_numeric(df.get(col), errors="coerce")
+        return (s <= float(v)) | s.isna()
+
+    # Budget
+    if "price_myr" in df.columns:
+        price = pd.to_numeric(df["price_myr"], errors="coerce")
+        lo = float(prefs.get("budget_min", 0))
+        hi = float(prefs.get("budget_max", float("inf")))
+        mask &= (price.between(lo, hi, inclusive="both")) | price.isna()
+
+    # Numeric mins
+    if prefs.get("min_ram") is not None:
+        mask &= ge("ram_base_GB", prefs["min_ram"])
+    if prefs.get("min_storage") is not None:
+        mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
+    if prefs.get("min_vram") is not None:
+        mask &= ge("gpu_vram_GB", prefs["min_vram"])
+    if prefs.get("min_cpu_cores") is not None:
+        mask &= ge("cpu_cores", prefs["min_cpu_cores"])
+    if prefs.get("min_year") is not None:
+        mask &= ge("year", prefs["min_year"])
+    if prefs.get("min_refresh") is not None:
+        mask &= ge("display_refresh_Hz", prefs["min_refresh"])
+    if prefs.get("min_battery_wh") is not None:
+        mask &= ge("battery_capacity_Wh", prefs["min_battery_wh"])
+
+    # Max weight
+    if prefs.get("max_weight") is not None:
+        mask &= le("weight_kg", prefs["max_weight"])
+
+    return mask
+
 
 # UI
 st.markdown("""
