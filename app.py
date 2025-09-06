@@ -7,9 +7,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
-# Config & Page
-st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
-
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 DRIVE_ID = "18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4"
 GID = "418897947" 
@@ -219,7 +216,6 @@ def render_results(recs: pd.DataFrame, style_bucket: str):
             st.markdown("**Why it fits:** " + " • ".join(why))
             st.markdown("---")
 
-
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
@@ -293,7 +289,6 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame,  test_df: 
     price_te = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
     results = []
     
-#Customization Slidebar
     for lab in labels:
         # Budget bounds from TEST set with safe fallbacks
         price_clean = price_te.dropna()
@@ -717,6 +712,7 @@ with st.container():
     # 2) Style
     style_choice = st.radio("Preferred style", STYLE_CHOICES, horizontal=True)
     style_bucket = STYLE_TO_BUCKET.get(style_choice, "Student")
+    min_vram_default = 4 if style_bucket == "Gaming" else 0
 
     # 3) Balance slider (replaces Hybrid α)
     balance = st.slider("Spec match", 1.0, 0.6, 0.05)
@@ -733,7 +729,7 @@ with st.expander("Advanced filters (optional)", expanded=False):
         if style_bucket == "Gaming":
             min_vram = st.number_input("Min GPU VRAM (GB)", 0, 24, min_vram_default, 1)
         else:
-            min_vram = min_vram_default  # keep 0 when not shown
+            min_vram = min_vram_default  # 0 for non-gaming by default
         min_year = st.number_input("Min Release Year", 2015, 2025, 2019, 1)
     with col2:
         max_weight = st.number_input("Max Weight (kg)", 0.0, 6.0, 3.0, 0.1)
