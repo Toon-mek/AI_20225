@@ -19,9 +19,16 @@ GID = "418897947"
 # Data loading
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_sheet_csv(output="/tmp/laptops.csv"):
-    url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
-    gdown.download(url, output, quiet=True)
-    return output
+    """Download the Google Sheet as CSV with clear errors."""
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
+        path = gdown.download(url, output, quiet=True)
+        if not path or not Path(path).exists():
+            raise FileNotFoundError("Download returned no file.")
+        return path
+    except Exception as e:
+        # Bubble up a friendly error so Streamlit shows it nicely
+        raise RuntimeError(f"Failed to download dataset from Google Drive: {e}") from e
 
 @st.cache_data(show_spinner=False)
 def load_dataset() -> pd.DataFrame:
@@ -103,9 +110,19 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
-    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
-    X = vec.fit_transform(spec_text.fillna(""))
-    return vec, X
+    """Vectorize specs; show helpful errors and keep the app running."""
+    try:
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
+        X = vec.fit_transform(spec_text.fillna(""))
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("Empty TF-IDF vocabulary/corpus.")
+        return vec, X
+    except Exception as e:
+        st.error(f"Vectorizer error: {e}")
+        # Fallback: very safe defaults so the UI keeps working
+        vec = TfidfVectorizer()
+        X = vec.fit_transform(spec_text.fillna("").replace("", "NA"))
+        return vec, X
 
 def compute_row_sim(_X, row_index: int) -> np.ndarray:
     return cosine_similarity(_X[row_index], _X).ravel()
