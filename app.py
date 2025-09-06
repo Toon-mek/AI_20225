@@ -675,24 +675,19 @@ else:
 
 with st.expander("📋 Data validation & data quality checks", expanded=False):
     issues = []
-
     missing_in_raw = [c for c in EXPECTED if c not in raw.columns]
     if missing_in_raw:
         issues.append(f"Missing in source file: {missing_in_raw}")
-
     key_cols = [c for c in ["brand", "series", "model", "year"] if c in df.columns]
     if key_cols:
         dup_count = df.duplicated(subset=key_cols, keep=False).sum()
         if dup_count > 0:
             issues.append(f"{int(dup_count)} duplicate rows by {key_cols}.")
-
     nulls = summarize_nulls(df)
     if (nulls["nulls"] > 0).any():
         st.write("**Null counts (post-clean):**")
         st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
-
     issues += range_checks(df)
-
     if issues:
         st.error("• " + "\n• ".join(issues))
     else:
