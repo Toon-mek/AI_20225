@@ -544,19 +544,11 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
         return (s <= float(v)) | s.isna()
 
     # Budget
-    pc = pd.to_numeric(df.get("price_myr"), errors="coerce")
-    pc = pc[pc > 0].dropna()
-    
-    if pc.empty:
-        lo, hi = 0, 20000
-        d_lo, d_hi = 1500, 8000
-        step = 100
-    else:
-        lo, hi = int(pc.min()), int(pc.max())
-        d_lo, d_hi = int(np.percentile(pc, 25)), int(np.percentile(pc, 75))
-        step = 50 if (hi - lo) < 3000 else 100
-    
-    budget = st.slider("Budget (MYR)", lo, hi, (d_lo, d_hi), step=step)
+    if "price_myr" in df.columns:
+        price = pd.to_numeric(df["price_myr"], errors="coerce")
+        lo = float(prefs.get("budget_min", 0))
+        hi = float(prefs.get("budget_max", float("inf")))
+        mask &= (price.between(lo, hi, inclusive="both")) | price.isna()
 
     # Numeric mins
     if prefs.get("min_ram") is not None:
