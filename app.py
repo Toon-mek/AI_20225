@@ -19,24 +19,31 @@ GID = "418897947"
 # Data loading
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_sheet_csv(output="/tmp/laptops.csv"):
-    """Download the Google Sheet as CSV with clear errors."""
+    url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
     try:
-        url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
-        path = gdown.download(url, output, quiet=True)
-        if not path or not Path(path).exists():
-            raise FileNotFoundError("Download returned no file.")
-        return path
+        gdown.download(url, output, quiet=True, fuzzy=True)
     except Exception as e:
-        # Bubble up a friendly error so Streamlit shows it nicely
-        raise RuntimeError(f"Failed to download dataset from Google Drive: {e}") from e
+        raise FileNotFoundError(
+            f"Failed to download CSV from Google Sheets. "
+            f"Check DRIVE_ID='{DRIVE_ID}' and GID='{GID}'. Details: {e}"
+        )
+    p = Path(output)
+    if (not p.exists()) or p.stat().st_size == 0:
+        raise FileNotFoundError(
+            "Downloaded file is empty or missing. Verify the sheet is public/readable and the GID is correct."
+        )
+    return output
 
 @st.cache_data(show_spinner=False)
 def load_dataset() -> pd.DataFrame:
     p = Path(DATA_PATH)
     if p.exists():
         return pd.read_csv(p, low_memory=False)
-    downloaded = download_sheet_csv("/tmp/laptops.csv")
-    return pd.read_csv(downloaded, low_memory=False)
+    csv_path = download_sheet_csv("/tmp/laptops.csv")
+    try:
+        return pd.read_csv(csv_path, low_memory=False)
+    except Exception as e:
+        raise RuntimeError(f"Could not read CSV at {csv_path}. Parser/encoding issue? Details: {e}")
 
 # Prep / Utilities
 EXPECTED = [
@@ -151,96 +158,24 @@ def range_checks(df: pd.DataFrame) -> list[str]:
 
     return msgs
 
-
-# ---------- Validations & business rules ----------
-def validate_prefs(prefs: dict) -> list[str]:
-    """Return a list of validation error strings (empty if OK)."""
-    errs = []
-    if prefs.get("budget_min", 0) < 0:
-        errs.append("Budget min cannot be negative.")
-    if prefs.get("budget_max", 0) < prefs.get("budget_min", 0):
-        errs.append("Budget max must be ≥ min.")
-    for k in ("min_ram","min_storage","min_vram","min_cpu_cores","min_refresh","min_battery_wh"):
-        v = prefs.get(k, 0)
-        if v is not None and float(v) < 0:
-            errs.append(f"{k} cannot be negative.")
-    if prefs.get("max_weight") is not None and float(prefs["max_weight"]) <= 0:
-        errs.append("Max weight must be > 0.")
-    return errs
-
-
-def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
-    """Adjust prefs (soft constraints) based on use-case; return (new_prefs, notices)."""
-    p = dict(prefs)
-    notes = []
-    u = str(p.get("use_case", "")).lower()
-
-    if u in ("gaming", "gamer"):
-        if float(p.get("min_vram", 0)) < 4:
-            p["min_vram"] = 4
-            notes.append("Gaming: raised min VRAM to 4 GB.")
-        if float(p.get("min_refresh", 0)) < 60:
-            p["min_refresh"] = 60
-            notes.append("Gaming: raised min refresh to 60 Hz.")
-
-    if u in ("student", "office", "productivity"):
-        if float(p.get("max_weight", 99)) > 2.0:
-            p["max_weight"] = 2.0
-            notes.append("Student/Office: tightened max weight to 2.0 kg.")
-
-    return p, notes
-
-def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
-    """Build a boolean mask from numeric constraints + budget."""
-    m = pd.Series(True, index=df.index)
-
-    # Budget (keep NaN price too)
-    if "price_myr" in df:
-        price = pd.to_numeric(df["price_myr"], errors="coerce")
-        m &= (price.between(prefs.get("budget_min", 0), prefs.get("budget_max", float("inf")))) | price.isna()
-
-    # Simple ≥ filters
-    def ge(col, key):
-        if key in prefs and col in df and prefs[key] is not None:
-            v = float(prefs[key])
-            return pd.to_numeric(df[col], errors="coerce").ge(v).fillna(False)
-        return pd.Series(True, index=df.index)
-
-    m &= ge("ram_base_GB", "min_ram")
-    m &= ge("storage_primary_capacity_GB", "min_storage")
-    m &= ge("gpu_vram_GB", "min_vram")
-    m &= ge("cpu_cores", "min_cpu_cores")
-    m &= ge("display_refresh_Hz", "min_refresh")
-    m &= ge("battery_capacity_Wh", "min_battery_wh")
-
-    # Year ≥
-    if "year" in df and "min_year" in prefs and prefs["min_year"] is not None:
-        yr = pd.to_numeric(df["year"], errors="coerce")
-        m &= yr.ge(float(prefs["min_year"])).fillna(False)
-
-    # Weight ≤
-    if "weight_kg" in df and "max_weight" in prefs and prefs["max_weight"] is not None:
-        w = pd.to_numeric(df["weight_kg"], errors="coerce")
-        m &= w.le(float(prefs["max_weight"])).fillna(False)
-
-    return m
-
 # Content features (TF-IDF)
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
-    """Vectorize specs; show helpful errors and keep the app running."""
+    s = spec_text.fillna("").astype(str)
+    if not s.str.strip().any():
+        # All empty -> return empty matrix
+        from scipy.sparse import csr_matrix
+        vec = TfidfVectorizer()
+        X = csr_matrix((len(s), 0))
+        return vec, X
     try:
         vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
-        X = vec.fit_transform(spec_text.fillna(""))
-        if X.shape[0] == 0 or X.shape[1] == 0:
-            raise ValueError("Empty TF-IDF vocabulary/corpus.")
-        return vec, X
-    except Exception as e:
-        st.error(f"Vectorizer error: {e}")
-        # Fallback: very safe defaults so the UI keeps working
-        vec = TfidfVectorizer()
-        X = vec.fit_transform(spec_text.fillna("").replace("", "NA"))
-        return vec, X
+        X = vec.fit_transform(s)
+    except ValueError:
+        # Fallback for tiny datasets
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1, stop_words=None)
+        X = vec.fit_transform(s)
+    return vec, X
 
 def compute_row_sim(_X, row_index: int) -> np.ndarray:
     return cosine_similarity(_X[row_index], _X).ravel()
@@ -356,7 +291,6 @@ def evaluate_precision_recall_at_k_train_test(
         })
     return pd.DataFrame(results)
 
-
 # Rule-based scoring
 def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
     def nz(col, default=0.0):
@@ -401,8 +335,13 @@ def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int 
     if not idxs:
         st.write("Model not found.")
         return pd.DataFrame()
-    i = idxs[0]
-    sim = compute_row_sim(X, i)
+i = idxs[0]
+# Guard: empty TF-IDF vocabulary
+if getattr(X, "shape", (0, 0))[1] == 0:
+    st.warning("Similarity is unavailable (empty TF-IDF vocabulary). Add more text features or rows.")
+    return pd.DataFrame()
+
+sim = compute_row_sim(X, i)
     order = np.argsort(-sim)
     order = [j for j in order if j != i][:top_n]
     out = df.iloc[order].copy()
@@ -455,7 +394,6 @@ def validate_prefs(prefs: dict) -> list[str]:
         except Exception:
             errs.append("min_year must be an integer.")
     return errs
-
 
 def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
     """
@@ -553,7 +491,6 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
         mask &= le("weight_kg", prefs["max_weight"])
 
     return mask
-
 
 # UI
 st.markdown("""
