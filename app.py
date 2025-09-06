@@ -704,12 +704,7 @@ if recs is not None:
     if recs.empty:
         st.warning("No matching laptops found for your preferences.")
     else:
-        st.dataframe(recs, width="stretch")  # <- replaces deprecated use_container_width
-        st.download_button(
-            "Download results (CSV)",
-            recs.to_csv(index=False).encode("utf-8"),
-            file_name=f"laptop_recommendations_{algo.lower()}.csv",
-        )
+        st.dataframe(recs, width="stretch")
         
 DEV_MODE= True
 
