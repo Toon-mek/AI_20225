@@ -445,7 +445,8 @@ if recs is not None:
             recs.to_csv(index=False).encode("utf-8"),
             file_name=f"laptop_recommendations_{algo.lower()}.csv",
         )
-DEV_MODE= TRUE
+DEV_MODE= True
+
 if DEV_MODE:
     with st.expander("Train/Test evaluation (Precision@K & Recall@K)"):
         test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
