@@ -180,7 +180,7 @@ def why_this(row: pd.Series, style_bucket: str) -> list[str]:
     ram = pd.to_numeric(row.get("ram_base_GB"), errors="coerce")
     res = str(row.get("display_resolution") or "")
 
-    # Always-on student-friendly hints
+    # Always-on  hints
     if pd.notna(w) and w <= 1.5: bullets.append("lightweight")
     if pd.notna(bat) and bat >= 50: bullets.append("long battery life")
 
@@ -717,7 +717,7 @@ with st.container():
     style_bucket = STYLE_TO_BUCKET.get(style_choice, "Student")
 
     # 3) Balance slider (replaces Hybrid α)
-    st.markdown("**What should we prioritize?**  \nStudent-friendly ⟵ **balance** ⟶ Spec match")
+    st.markdown("**Spec match?**")
     balance = st.slider("", 0.0, 1.0, 0.6, 0.05)
 
     # 4) How many to show (replaces Top N)
