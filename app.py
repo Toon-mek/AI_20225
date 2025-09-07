@@ -90,6 +90,19 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         text_parts.append(" ".join([p for p in parts if p]))
     data["spec_text"] = text_parts
 
+    gpu = str(r["gpu_model"] or "").upper()
+    hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
+    res = str(r.get("display_resolution") or "").upper()
+    
+    is_discrete = any(x in gpu for x in ["RTX","GTX","RX","ARC"])
+    creator_res = any(x in res for x in ["2560","2880","3000","3200","3840","4K"])
+    
+    parts += [
+        "DISCRETE_GPU" if is_discrete else "IGPU",
+        "HZ120PLUS" if (pd.notna(hz) and hz >= 120) else "",
+        "CREATOR_RES" if creator_res else ""
+    ]
+
     key = ["model","year"] if "year" in data else ["model"]
     data = data.drop_duplicates(subset=key, keep="first")
     return data.reset_index(drop=True)
@@ -197,14 +210,22 @@ def price_proximity(view: pd.DataFrame, lo: float, hi: float) -> np.ndarray:
 
 def build_pref_query(prefs: dict) -> str:
     parts = []
+    u = (prefs.get("use_case") or "").lower()
     if prefs.get("use_case"): parts += [f"USE {prefs['use_case']}"]
+    if u == "gaming":
+        parts += ["DISCRETE_GPU", "HZ120PLUS"]
+    elif u == "creator":
+        parts += ["CREATOR_RES", "DISCRETE_GPU"]
+    elif u == "business":
+        parts += ["IGPU"]
+    # numeric wishes
     if prefs.get("min_ram"): parts += [f"RAM{prefs['min_ram']}GB"]
     if prefs.get("min_vram"): parts += [f"VRAM{prefs['min_vram']}GB"]
     if prefs.get("min_cpu_cores"): parts += [f"CORES{prefs['min_cpu_cores']}"]
     if prefs.get("min_refresh"): parts += [f"HZ{prefs['min_refresh']}HZ"]
     if prefs.get("min_storage"): parts += [f"SSD{prefs['min_storage']}GB"]
     if prefs.get("min_year"): parts += [f"Y{prefs['min_year']}"]
-    return " ".join(parts)
+    return " ".join([p for p in parts if p])0
 
 def validate_prefs(prefs: dict) -> list[str]:
     errs = []
@@ -370,48 +391,54 @@ def first_at_least(options, target):
     return options[-1]
 
 # ─────────────────────────── Evaluation
-def split_df(df: pd.DataFrame, test_size: float = 0.3, random_state: int = 42, label_col: str = "intended_use_case_norm"):
-    """70/30 train/test by default; stratify on label (collapsed to 3 classes)."""
+def split_df(df: pd.DataFrame, test_size: float = 0.30, random_state: int = 42,
+             label_col: str = "intended_use_case_norm"):
+    """
+    Split on ALL normalized labels (Business/Gaming/Creator/Student) to keep vocab rich.
+    We'll filter to the 3 allowed labels only inside the evaluator.
+    """
     if label_col not in df.columns:
-        if "intended_use_case" in df.columns: label_col = "intended_use_case"
+        if "intended_use_case" in df.columns:
+            label_col = "intended_use_case"
         else:
             tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
             return tr.reset_index(drop=True), te.reset_index(drop=True)
-    y = df[label_col].astype(str).str.strip().replace({"nan":"","None":""})
-    y = y.mask(y.eq(""), "Business")  # fallback into allowed set
-    # keep only allowed labels
-    keep = df[label_col].isin(ALLOWED_LABELS)
-    base = df.loc[keep].copy()
-    y = base[label_col]
+
+    y = df[label_col].astype(str).str.strip().replace({"nan": "", "None": ""})
+    y = y.mask(y.eq(""), "Student")  # harmless default
     try:
-        tr, te = train_test_split(base, test_size=test_size, random_state=random_state, stratify=y)
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=y)
     except ValueError:
-        tr, te = train_test_split(base, test_size=test_size, random_state=random_state, stratify=None)
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
     return tr.reset_index(drop=True), te.reset_index(drop=True)
 
-def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: pd.DataFrame, k: int = 5, alpha: float = 0.6, label_col: str = "intended_use_case_norm") -> pd.DataFrame:
-    # Fit TF-IDF on TRAIN only, apply to TEST
+def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: pd.DataFrame,
+                                              k: int = 5, alpha: float = 0.6,
+                                              label_col: str = "intended_use_case_norm") -> pd.DataFrame:
+    # keep only the 3 labels in TEST for scoring (train can include Student)
+    allowed = {"Business","Gaming","Creator"}
+    test_df = test_df[test_df[label_col].isin(allowed)].copy()
+    if test_df.empty:
+        return pd.DataFrame(columns=["scenario","precision@k","recall@k","f1@k","mse","rmse"])
+
+    # fit TF-IDF on TRAIN only
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2)
     vec.fit(train_df["spec_text"].fillna(""))
     X_test = vec.transform(test_df["spec_text"].fillna(""))
 
     labels = ["Business","Gaming","Creator"]  # fixed set
 
-    price = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
-    p = price.dropna()
-    lo, hi = (float(p.quantile(0.05)), float(p.quantile(0.95))) if len(p) >= 5 else (float(p.min()) if len(p) else 0.0, float(p.max()) if len(p) else 20000.0)
-    mask = price.between(lo, hi, inclusive="both") | price.isna()
-    view, Xv = test_df.loc[mask].copy(), X_test[mask.values]
-
     out = []
     for lab in labels:
-        prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4, min_year=2018, min_refresh=60)
-        sim = cosine_similarity(vec.transform([build_pref_query(prefs)]), Xv).ravel()
+        prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0,
+                     min_cpu_cores=4, min_year=2018, min_refresh=60)
+
+        sim = cosine_similarity(vec.transform([build_pref_query(prefs)]), X_test).ravel()
         sim_norm = (sim - sim.min()) / (sim.max() - sim.min()) if sim.max() > sim.min() else sim
-        rb = rule_based_scores(view, lab)
+        rb = rule_based_scores(test_df, lab)
         scores = alpha * sim_norm + (1 - alpha) * rb
 
-        ranked = view.assign(score=scores).sort_values("score", ascending=False)
+        ranked = test_df.assign(score=scores).sort_values("score", ascending=False)
         topk = ranked.head(k)
 
         truth_col = label_col if label_col in ranked.columns else "intended_use_case"
@@ -426,7 +453,14 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
         mse = float(np.mean((y_pred_all - y_true_all) ** 2)) if len(y_true_all) else np.nan
         rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
 
-        out.append({"scenario": lab, "precision@k": round(precision,3), "recall@k": round(recall,3), "f1@k": round(f1,3), "mse": round(mse,4) if not np.isnan(mse) else np.nan, "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan})
+        out.append({
+            "scenario": lab,
+            "precision@k": round(precision,3),
+            "recall@k": round(recall,3),
+            "f1@k": round(f1,3),
+            "mse": round(mse,4) if not np.isnan(mse) else np.nan,
+            "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan
+        })
     return pd.DataFrame(out)
 
 @st.cache_data(show_spinner=False)
