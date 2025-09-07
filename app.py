@@ -315,86 +315,59 @@ def evaluate_precision_recall_at_k_train_test(
     alpha: float = 0.6,
     label_col: str = "intended_use_case_norm",
 ) -> pd.DataFrame:
-    """
-    Fit TF-IDF on TRAIN only; evaluate on TEST.
-    No UI variables are used here. Budgets are derived from TEST price distribution.
-    """
-    # Fit on TRAIN, transform TEST
+    # --- Fit TF-IDF on TRAIN, apply to TEST ---
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
-    X_train = vec.fit_transform(train_df["spec_text"].fillna(""))
-    X_test  = vec.transform(test_df["spec_text"].fillna(""))
+    vec.fit(train_df["spec_text"].fillna(""))
+    X_test = vec.transform(test_df["spec_text"].fillna(""))
 
-    # Labels to evaluate
-    if label_col in train_df.columns and train_df[label_col].dropna().size:
-        labels = sorted({str(x).strip() for x in train_df[label_col].dropna() if str(x).strip()})
+    # labels to evaluate
+    if label_col in train_df and train_df[label_col].notna().any():
+        labels = sorted(x for x in train_df[label_col].astype(str).str.strip().unique() if x)
     else:
         labels = ["Gaming", "Student", "Creator", "Business"]
 
-    price_te = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
-    results = []
+    # simple budget window from TEST (for a realistic pool)
+    price = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
+    p = price.dropna()
+    lo, hi = (float(p.quantile(0.05)), float(p.quantile(0.95))) if len(p) >= 5 else (float(p.min()) if len(p) else 0.0, float(p.max()) if len(p) else 20000.0)
+    mask = price.between(lo, hi, inclusive="both") | price.isna()
+    view = test_df.loc[mask].copy()
+    Xv = X_test[mask.values]
 
+    out = []
     for lab in labels:
-        # Budget bounds from TEST set (robust to tiny sets)
-        price_clean = price_te.dropna()
-        if len(price_clean) >= 5:
-            lo = float(price_clean.quantile(0.05))
-            hi = float(price_clean.quantile(0.95))
-        elif len(price_clean) >= 1:
-            lo = float(price_clean.min())
-            hi = float(price_clean.max())
-        else:
-            lo, hi = 0.0, 20000.0
+        # query from the scenario
+        prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4, min_year=2018, min_refresh=60)
+        q = vec.transform([build_pref_query(prefs)])
+        sim = cosine_similarity(q, Xv).ravel()
+        sim_norm = (sim - sim.min()) / (sim.max() - sim.min()) if sim.max() > sim.min() else sim
+        rb = rule_based_scores(view, lab)  # in [0,1]
+        scores = alpha * sim_norm + (1 - alpha) * rb  # predicted relevance ∈[0,1]
 
-        # Scenario prefs (independent of the UI)
-        prefs = dict(
-            use_case=lab,
-            budget_min=lo, budget_max=hi,
-            min_ram=8,
-            min_storage=512,
-            min_vram=0,
-            min_cpu_cores=4,
-            min_year=2018,
-            min_refresh=60,
-            alpha=alpha,
-        )
+        ranked = view.assign(score=scores).sort_values("score", ascending=False)
+        topk = ranked.head(k)
 
-        # Keep only items in budget range
-        mask = price_te.between(lo, hi, inclusive="both") | price_te.isna()
-        view = test_df.loc[mask].copy()
-        if view.empty:
-            results.append({"scenario": lab, "matched@k": 0, "precision@k": np.nan, "recall@k": np.nan})
-            continue
+        truth_col = label_col if label_col in ranked.columns else "intended_use_case"
+        y_true_all = (ranked[truth_col].astype(str).str.lower() == lab.lower()).astype(float).to_numpy()
+        y_pred_all = ranked["score"].to_numpy()
 
-        # Content similarity: TRAIN-fit vectorizer on TEST items
-        query_text = build_pref_query(prefs)
-        q = vec.transform([query_text])
-        sim_all = cosine_similarity(q, X_test).ravel()
-        sim = sim_all[mask.values]
-
-        # Hybrid score
-        if sim.max() > sim.min():
-            sim_norm = (sim - sim.min()) / (sim.max() - sim.min())
-        else:
-            sim_norm = sim
-        rb = rule_based_scores(view, lab)
-        scores = alpha * sim_norm + (1 - alpha) * rb
-
-        topk = view.assign(score=scores).sort_values("score", ascending=False).head(k)
-
-        # Did we place at least one correct label in top-K?
-        truth_labels = topk.get(label_col, topk.get("intended_use_case")).astype(str).str.lower()
-        matched = (truth_labels == lab.lower()).sum()
+        matched = int((topk[truth_col].astype(str).str.lower() == lab.lower()).sum())
         precision = matched / max(k, 1)
         recall = 1.0 if matched > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-        results.append({
+        mse = float(np.mean((y_pred_all - y_true_all) ** 2)) if len(y_true_all) else np.nan
+        rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
+
+        out.append({
             "scenario": lab,
-            "matched@k": int(matched),
             "precision@k": round(precision, 3),
             "recall@k": round(recall, 3),
+            "f1@k": round(f1, 3),
+            "mse": round(mse, 4) if not np.isnan(mse) else np.nan,
+            "rmse": round(rmse, 4) if not np.isnan(rmse) else np.nan,
         })
-
-    return pd.DataFrame(results)
+    return pd.DataFrame(out)
 
 # Rule-based scoring
 def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
@@ -849,3 +822,6 @@ if DEV_MODE:
                     st.write(te_df[LABEL_COL].value_counts(dropna=False))
 
             st.dataframe(res, width="stretch")
+            if not res.empty:
+                st.write(f"**Mean F1@{k_eval}:** {res['f1@k'].mean():.3f}  |  **Mean MSE:** {res['mse'].mean():.4f}  |  **Mean RMSE:** {res['rmse'].mean():.4f}")
+
