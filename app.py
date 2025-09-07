@@ -7,8 +7,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
-# ─────────────────────────── Config
-st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 DRIVE_ID = "18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4"
 GID = "418897947"
@@ -32,7 +30,7 @@ NUMERIC = [
 ]
 ALLOWED_LABELS = {"Business","Gaming","Creator"}  # ← we train/eval on these only
 
-# ─────────────────────────── Data loading
+# Data loading
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_sheet_csv(output="/tmp/laptops.csv"):
     url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
@@ -49,7 +47,7 @@ def load_dataset() -> pd.DataFrame:
         return pd.read_csv(p, low_memory=False)
     return pd.read_csv(download_sheet_csv("/tmp/laptops.csv"), low_memory=False)
 
-# ─────────────────────────── Prep
+#  Prep
 def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     for c in EXPECTED:
@@ -89,7 +87,6 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             tok(r["os"]), f"USE {tok(r['intended_use_case'])}", numtok("Y", r["year"])
         ]
 
-        # --- engineered tokens (kept simple & lab-style) ---
         gpu = str(r.get("gpu_model") or "").upper()
         hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
         res = str(r.get("display_resolution") or "").upper()
@@ -103,8 +100,6 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             numtok("VRAM", r.get("gpu_vram_GB"), "GB"),
             numtok("CORES", r.get("cpu_cores"))
         ]
-        # ---------------------------------------------------
-
         text_parts.append(" ".join([p for p in parts if p]))
 
     data["spec_text"] = text_parts
@@ -143,7 +138,7 @@ def range_checks(df: pd.DataFrame) -> list[str]:
         if (p < 0).sum() > 0: msgs.append(f"{int((p < 0).sum())} negative prices.")
     return msgs
 
-# ─────────────────────────── Features / scoring
+#  Features
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
     s = spec_text.fillna("").astype(str)
@@ -224,7 +219,6 @@ def build_pref_query(prefs: dict) -> str:
         parts += ["CREATOR_RES", "DISCRETE_GPU"]
     elif u == "business":
         parts += ["IGPU"]
-
     # numeric wishes (match tokens we added to spec_text)
     if prefs.get("min_ram"):        parts += [f"RAM{prefs['min_ram']}GB"]
     if prefs.get("min_vram"):       parts += [f"VRAM{prefs['min_vram']}GB"]
@@ -232,7 +226,6 @@ def build_pref_query(prefs: dict) -> str:
     if prefs.get("min_refresh"):    parts += [f"HZ{prefs['min_refresh']}HZ"]
     if prefs.get("min_storage"):    parts += [f"SSD{prefs['min_storage']}GB"]
     if prefs.get("min_year"):       parts += [f"Y{prefs['min_year']}"]
-
     return " ".join([p for p in parts if p])
 
 def validate_prefs(prefs: dict) -> list[str]:
@@ -398,7 +391,7 @@ def first_at_least(options, target):
         if v >= target: return v
     return options[-1]
 
-# ─────────────────────────── Evaluation
+# Evaluation
 def split_df(df: pd.DataFrame, test_size: float = 0.30, random_state: int = 42,
              label_col: str = "intended_use_case_norm"):
     """
@@ -440,30 +433,23 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
     for lab in labels:
         prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0,
                      min_cpu_cores=4, min_year=2018, min_refresh=60)
-
         sim = cosine_similarity(vec.transform([build_pref_query(prefs)]), X_test).ravel()
         sim_norm = (sim - sim.min()) / (sim.max() - sim.min()) if sim.max() > sim.min() else sim
         rb = rule_based_scores(test_df, lab)
         scores = alpha * sim_norm + (1 - alpha) * rb
-
         ranked = test_df.assign(score=scores).sort_values("score", ascending=False)
-
         truth_col = label_col if label_col in ranked.columns else "intended_use_case"
         is_rel = ranked[truth_col].astype(str).str.lower().eq(lab.lower()).to_numpy()
-
         hits_at_k = int(is_rel[:k].sum())
         total_rel = int(is_rel.sum())
         if total_rel == 0:
             # nothing to judge for this label in TEST; skip to avoid fake zeros
             continue
-
         precision = hits_at_k / max(k, 1)
         recall = hits_at_k / total_rel
         f1 = (2*precision*recall/(precision+recall)) if (precision+recall) else 0.0
-
         mse = float(np.mean((ranked["score"].to_numpy() - is_rel.astype(float)) ** 2))
         rmse = float(np.sqrt(mse))
-
         out.append({
             "scenario": lab,
             "precision@k": round(precision,3),
@@ -627,22 +613,6 @@ if recs is not None:
             st.markdown("**Why it fits:** " + " • ".join(why_this(row, style_bucket)))
             with st.expander("Show/Hide more specs"): st.write(row.to_frame().T)
             st.markdown("---")
-
-with st.expander("Was this useful? (optional feedback)"):
-    with st.form("satisfaction_form"):
-        sat = st.slider("How satisfied are you with the top results?", 1, 5, 4)
-        comment = st.text_area("Any comments?")
-        submit = st.form_submit_button("Submit")
-        if submit:
-            import datetime
-            from pathlib import Path
-            row = {"ts": datetime.datetime.now().isoformat(), "satisfaction": sat, "comment": comment}
-            pd.DataFrame([row]).to_csv(
-                "feedback.csv",
-                mode="a", index=False,
-                header=not Path("feedback.csv").exists()
-            )
-            st.success("Thanks — feedback saved.")
 
 # ── Performance (fixed settings, no user tuning)
 with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
