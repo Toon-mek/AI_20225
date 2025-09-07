@@ -89,20 +89,21 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             tok(r["os"]), f"USE {tok(r['intended_use_case'])}", numtok("Y", r["year"])
         ]
 
-        # --- engineered tokens (now correctly inside the loop) ---
+        # --- engineered tokens (kept simple & lab-style) ---
         gpu = str(r.get("gpu_model") or "").upper()
         hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
         res = str(r.get("display_resolution") or "").upper()
-
         is_discrete = any(x in gpu for x in ["RTX","GTX","RX","ARC"])
         creator_res = any(x in res for x in ["2560","2880","3000","3200","3840","4K"])
-
+        # numeric spec tokens so the query can match
         parts += [
             "DISCRETE_GPU" if is_discrete else "IGPU",
             "HZ120PLUS" if (pd.notna(hz) and hz >= 120) else "",
-            "CREATOR_RES" if creator_res else ""
+            "CREATOR_RES" if creator_res else "",
+            numtok("VRAM", r.get("gpu_vram_GB"), "GB"),
+            numtok("CORES", r.get("cpu_cores"))
         ]
-        # ---------------------------------------------------------
+        # ---------------------------------------------------
 
         text_parts.append(" ".join([p for p in parts if p]))
 
@@ -121,10 +122,10 @@ def normalize_use_case(x: object) -> str:
     if any(k in t for k in ["student","general","productivity","office","ultrabook","ultralight","portable","writer"]): return "Student"
     return "Student"
 
+# IMPORTANT: keep non-allowed labels as Student (don’t force to Business)
 def map_to_three(lab: str) -> str:
-    """Force labels to {Business, Gaming, Creator}; push others to Business (change if you prefer)."""
     lab = str(lab or "").strip()
-    return lab if lab in ALLOWED_LABELS else "Business"
+    return lab if lab in ALLOWED_LABELS else "Student"
 
 def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
     s = df.isna().sum()
@@ -165,10 +166,8 @@ def compute_query_sim(vec: TfidfVectorizer, X, qtext: str) -> np.ndarray:
     return cosine_similarity(vec.transform([qtext]), X).ravel()
 
 def portability_score(view: pd.DataFrame) -> np.ndarray:
-    # weight: full at ≤1.3 kg, fades to 0 by ≥1.9 kg
     w = pd.to_numeric(view.get("weight_kg"), errors="coerce")
     w_score = ((1.9 - w) / 0.6).clip(0, 1)
-    # battery: 0 at ≤50 Wh, full at ≥90 Wh
     b = pd.to_numeric(view.get("battery_capacity_Wh"), errors="coerce")
     b_score = ((b - 50) / 40).clip(0, 1)
     return (0.6 * w_score.fillna(0) + 0.4 * b_score.fillna(0)).to_numpy()
@@ -184,7 +183,7 @@ def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
     s += 0.10 * np.clip((year - 2018) / 7.0, 0, 1)
     s += 0.10 * np.clip(storage / 1024.0, 0, 1)
 
-    port = portability_score(view)  # everywhere
+    port = portability_score(view)
     s += 0.08 * port
 
     u = str(use_case or "").lower()
@@ -226,7 +225,8 @@ def build_pref_query(prefs: dict) -> str:
         parts += ["CREATOR_RES", "DISCRETE_GPU"]
     elif u == "business":
         parts += ["IGPU"]
-    # numeric wishes
+
+    # numeric wishes (match tokens we added to spec_text)
     if prefs.get("min_ram"):        parts += [f"RAM{prefs['min_ram']}GB"]
     if prefs.get("min_vram"):       parts += [f"VRAM{prefs['min_vram']}GB"]
     if prefs.get("min_cpu_cores"):  parts += [f"CORES{prefs['min_cpu_cores']}"]
@@ -430,12 +430,12 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
     if test_df.empty:
         return pd.DataFrame(columns=["scenario","precision@k","recall@k","f1@k","mse","rmse"])
 
-    # fit TF-IDF on TRAIN only
-    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2)
+    # fit TF-IDF on TRAIN only (min_df=1 to keep rare but important tokens)
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
     vec.fit(train_df["spec_text"].fillna(""))
     X_test = vec.transform(test_df["spec_text"].fillna(""))
 
-    labels = ["Business","Gaming","Creator"]  # fixed set
+    labels = ["Business","Gaming","Creator"]
 
     out = []
     for lab in labels:
@@ -448,18 +448,17 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
         scores = alpha * sim_norm + (1 - alpha) * rb
 
         ranked = test_df.assign(score=scores).sort_values("score", ascending=False)
-        topk = ranked.head(k)
 
         truth_col = label_col if label_col in ranked.columns else "intended_use_case"
-        y_true_all = (ranked[truth_col].astype(str).str.lower() == lab.lower()).astype(float).to_numpy()
-        y_pred_all = ranked["score"].to_numpy()
+        is_rel = ranked[truth_col].astype(str).str.lower().eq(lab.lower()).to_numpy()
 
-        matched = int((topk[truth_col].astype(str).str.lower() == lab.lower()).sum())
-        precision = matched / max(k, 1)
-        recall = 1.0 if matched > 0 else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        hits_at_k = int(is_rel[:k].sum())
+        total_rel = int(is_rel.sum())
+        precision = hits_at_k / max(k, 1)
+        recall = hits_at_k / max(total_rel, 1)
+        f1 = (2*precision*recall/(precision+recall)) if (precision+recall) else 0.0
 
-        mse = float(np.mean((y_pred_all - y_true_all) ** 2)) if len(y_true_all) else np.nan
+        mse = float(np.mean((ranked["score"].to_numpy() - is_rel.astype(float)) ** 2)) if len(is_rel) else np.nan
         rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
 
         out.append({
@@ -613,7 +612,7 @@ if st.button("Show laptops"):
 
 if recs is not None:
     if recs.empty: st.warning("No matching laptops found for your choices.")
-    else: 
+    else:
         for i, row in recs.iterrows():
             st.markdown(f"### {i+1}. {row.get('brand','')} {row.get('series','')} {row.get('model','')}")
             price = pd.to_numeric(row.get("price_myr"), errors="coerce")
