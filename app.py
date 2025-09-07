@@ -610,7 +610,7 @@ prefs = dict(
     min_cpu_cores=4,
     min_year=_val(st.session_state["min_year"]),
     min_refresh=_val(st.session_state["min_refresh"]),
-    alpha=balance,  # if you still use it in scoring
+    alpha=0.6,
 )
 
 recs = None
