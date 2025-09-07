@@ -510,6 +510,21 @@ st.caption(f"{len(df)} laptops loaded from {'local file' if Path(DATA_PATH).exis
 
 # Label column -> normalize THEN collapse to 3 buckets
 LABEL_COL = "intended_use_case_norm"
+# ── Debug: make sure engineered tokens & class balance look right
+with st.expander("🧪 Debug — tokens & class balance", expanded=False):
+    st.write("**First 5 spec_text rows (should contain BUCKET_*, DISCRETE_GPU/HZ120PLUS/CREATOR_RES):**")
+    st.code("\n\n".join(df["spec_text"].head(5).tolist()))
+
+    st.write("**Overall label counts:**")
+    st.write(df[LABEL_COL].value_counts())
+
+    # Use the same test size you evaluate with
+    tr_dbg, te_dbg = split_df(df, test_size=0.40, label_col=LABEL_COL)
+    st.write("**Train label counts:**")
+    st.write(tr_dbg[LABEL_COL].value_counts())
+    st.write("**Test label counts:**")
+    st.write(te_dbg[LABEL_COL].value_counts())
+
 if "intended_use_case" in df.columns:
     df[LABEL_COL] = df["intended_use_case"].apply(normalize_use_case).apply(map_to_three)
 else:
