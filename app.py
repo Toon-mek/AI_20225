@@ -6,6 +6,9 @@ import gdown
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from scipy.sparse import hstack, csr_matrix
 
 # ─────────────────────────── Config
 st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
@@ -118,7 +121,7 @@ def range_checks(df: pd.DataFrame) -> list[str]:
         if (p < 0).sum() > 0: msgs.append(f"{int((p < 0).sum())} negative prices.")
     return msgs
 
-# ─────────────────────────── Features / scoring
+# Features / scoring
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
     s = spec_text.fillna("").astype(str)
@@ -132,6 +135,60 @@ def build_tfidf(spec_text: pd.Series):
         vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
         X = vec.fit_transform(s)
     return vec, X
+
+NUM_FEATS = ["ram_base_GB","gpu_vram_GB","cpu_cores","display_refresh_Hz",
+             "battery_capacity_Wh","weight_kg","year","storage_primary_capacity_GB"]
+
+@st.cache_resource(show_spinner=False)
+def train_usecase_model(train_df: pd.DataFrame, label_col: str):
+    # vectorize text
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2)
+    Xt = vec.fit_transform(train_df["spec_text"].fillna(""))
+
+    # numeric block (optional but helps)
+    num_cols = [c for c in NUM_FEATS if c in train_df.columns]
+    if num_cols:
+        num = train_df[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).values
+        scaler = StandardScaler(with_mean=False)  # keep sparse-friendly
+        Xn = scaler.fit_transform(num)
+        X = hstack([Xt, Xn], format="csr")
+    else:
+        scaler = None
+        X = Xt
+
+    # labels
+    y = train_df[label_col].astype(str).str.strip().replace({"nan":"","None":""}).mask(lambda s: s.eq(""), "unknown")
+
+    # classifier
+    clf = LogisticRegression(max_iter=2000, class_weight="balanced", multi_class="ovr", C=2.0)
+    clf.fit(X, y)
+    return vec, scaler, num_cols, clf, clf.classes_
+
+def proba_for_label(vec, scaler, num_cols, clf, df_view: pd.DataFrame, target_label: str):
+    Xt = vec.transform(df_view["spec_text"].fillna(""))
+    if num_cols:
+        num = df_view[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).values
+        Xn = scaler.transform(num)
+        X = hstack([Xt, Xn], format="csr")
+    else:
+        X = Xt
+    # probability for the requested class (fallback to zeros if unseen)
+    if hasattr(clf, "predict_proba"):
+        if target_label in clf.classes_:
+            idx = list(clf.classes_).index(target_label)
+            p = clf.predict_proba(X)[:, idx]
+        else:
+            p = np.zeros(X.shape[0], dtype=float)
+    else:
+        # decision_function fallback (scale to [0,1])
+        if target_label in clf.classes_:
+            idx = list(clf.classes_).index(target_label)
+            d = clf.decision_function(X)
+            d = d[:, idx] if d.ndim == 2 else d
+            p = (d - d.min()) / (d.max() - d.min() + 1e-9)
+        else:
+            p = np.zeros(X.shape[0], dtype=float)
+    return p
 
 def compute_row_sim(X, i: int) -> np.ndarray:
     return cosine_similarity(X[i], X).ravel()
@@ -298,36 +355,90 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
     if prefs.get("min_refresh") is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
     return mask
 
-def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
+def recommend_by_prefs(
+    df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10
+) -> pd.DataFrame:
+    """
+    Recommender with 3 modes:
+      - "Rule-Based": only rule_based_scores
+      - "Content-Based": prefers TRained-probabilities if available; else TF-IDF cosine
+      - "Hybrid": blend of content (trained if available) + rule-based (+ price proximity)
+    """
+    # --- 0) Validate + normalize prefs
     errs = validate_prefs(prefs)
     if errs:
-        st.error(" | ".join(errs)); return pd.DataFrame()
+        st.error(" | ".join(errs))
+        return pd.DataFrame()
     prefs2, notes = enforce_business_rules(prefs)
-    if notes: st.info(" ".join(notes))
-
+    if notes:
+        st.info(" ".join(notes))
+    # --- 1) Candidate pool (filters)
     mask = make_filter_mask(df, prefs2)
     view = df.loc[mask].copy()
-    if view.empty: return view
-
+    if view.empty:
+        return view
+    # --- 2) If Rule-Based only, easy exit
     if algo == "Rule-Based":
         scores = rule_based_scores(view, prefs2.get("use_case"))
-    else:
-        if getattr(X, "shape", (0, 0))[1] == 0:
-            st.warning("Content-based scoring unavailable (empty TF-IDF). Showing rule-based instead.")
-            scores = rule_based_scores(view, prefs2.get("use_case"))
-        else:
-            sim_all = compute_query_sim(vec, X, build_pref_query(prefs2))
-            sim = sim_all[mask.values]
-            if algo == "Content-Based":
-                scores = sim
-            else:
-                rng = np.ptp(sim); sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
-                rb = rule_based_scores(view, prefs2.get("use_case"))
-                a = float(prefs2.get("alpha", 0.6))
-                scores = a * sim_norm + (1 - a) * rb
-                pp = price_proximity(view, prefs2["budget_min"], prefs2["budget_max"])
-                scores = 0.7 * (a * sim_norm + (1 - a) * rb) + 0.3 * pp
+        view["score"] = scores
+        cols = [c for c in [
+            "brand","series","model","year","price_myr",
+            "cpu_brand","cpu_family","cpu_model","cpu_cores",
+            "gpu_brand","gpu_model","gpu_vram_GB",
+            "ram_base_GB","ram_type",
+            "storage_primary_type","storage_primary_capacity_GB",
+            "display_size_in","display_resolution","display_refresh_Hz","display_panel",
+            "battery_capacity_Wh","weight_kg","os","intended_use_case","score"
+        ] if c in view.columns]
+        return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
 
+    # --- 3) Content signal: try TRAINED model first; fall back to TF-IDF cosine
+    def trained_proba_or_none(_view: pd.DataFrame, label: str):
+        tg = globals()
+        have_model = all(k in tg and tg[k] is not None for k in
+                         ("text_vec", "num_scaler", "num_cols_trained", "clf_usecase"))
+        if not (have_model and label):
+            return None
+        try:
+            return proba_for_label(
+                tg["text_vec"], tg["num_scaler"], tg["num_cols_trained"], tg["clf_usecase"],
+                _view, str(label)
+            )  # ndarray float in [0,1]
+        except Exception:
+            return None
+    # 3a) Try trained probas
+    p_content = trained_proba_or_none(view, prefs2.get("use_case"))
+    # 3b) If no trained model, use your TF-IDF cosine to a preference query
+    if p_content is None:
+        if getattr(X, "shape", (0, 0))[1] == 0:
+            st.warning("Content-based signal unavailable (empty TF-IDF). Falling back to rule-based only.")
+            p_content = np.zeros(len(view), dtype=float)
+        else:
+            query = build_pref_query(prefs2)
+            sim_all = compute_query_sim(vec, X, query)
+            p_content = sim_all  # raw similarity; we’ll normalize below
+    # Normalize if this is a similarity vector (not already a prob)
+    # (Heuristic: if min<0 or max>1 we normalize to [0,1])
+    pc_min, pc_max = float(np.min(p_content)), float(np.max(p_content))
+    if pc_min < 0.0 or pc_max > 1.0:
+        rng = np.ptp(p_content)
+        p_content = (p_content - pc_min) / (rng if rng else 1.0)
+    # --- 4) Compose scores by mode
+    if algo == "Content-Based":
+        scores = p_content
+    else:
+        # Hybrid
+        rb = rule_based_scores(view, prefs2.get("use_case"))
+        a = float(prefs2.get("alpha", 0.6))
+        base = a * p_content + (1 - a) * rb
+
+        # Budget proximity blend (kept from your original)
+        try:
+            pp = price_proximity(view, prefs2["budget_min"], prefs2["budget_max"])
+            scores = 0.7 * base + 0.3 * pp
+        except Exception:
+            scores = base
+    # --- 5) Return ranked table
     view["score"] = scores
     cols = [c for c in [
         "brand","series","model","year","price_myr",
@@ -339,6 +450,7 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
         "battery_capacity_Wh","weight_kg","os","intended_use_case","score"
     ] if c in view.columns]
     return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
+
 
 def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int = 5):
     idxs = df.index[df["model"].astype(str).str.lower() == selected_model.lower()].tolist()
@@ -521,6 +633,8 @@ with st.expander("📋 Data validation & data quality checks", expanded=False):
 
 # Build TF-IDF space
 vec, X = build_tfidf(df["spec_text"])
+# Train a content model on ALL data
+text_vec, num_scaler, num_cols_trained, clf_usecase, clf_classes = train_usecase_model(df, LABEL_COL)
 
 # ── Search block
 search_term = st.text_input("Search for a Laptop Model or Brand 🔎").strip()
