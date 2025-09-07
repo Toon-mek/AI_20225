@@ -472,7 +472,7 @@ h1, h2, h3 { font-family: 'Helvetica Neue', sans-serif; }
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    if st.button("🔄 Clear cache & rerun"):
+    if st.button("Clear cache"):
         st.cache_data.clear(); st.cache_resource.clear(); st.rerun()
 
 st.title("💻 Laptop Recommender")
