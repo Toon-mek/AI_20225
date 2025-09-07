@@ -534,30 +534,78 @@ with st.container():
 
     results_count = st.slider("How many results to show?", 3, 30, 10, 1)
 
+if "prev_style" not in st.session_state:
+    st.session_state.prev_style = style_bucket
+    
 with st.expander("Advanced filters (optional)", expanded=False):
     col1, col2 = st.columns(2)
+
+    # options from data
     ram_opts  = unique_nums(df, "ram_base_GB", as_int=True)
     stor_opts = unique_nums(df, "storage_primary_capacity_GB", as_int=True)
     vram_opts = unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)
     year_opts = unique_nums(df, "year", as_int=True)
     ref_opts  = unique_nums(df, "display_refresh_Hz", as_int=True)
 
+    # --- style-aware defaults (update when style changes) ---
+    if st.session_state.prev_style != style_bucket:
+        st.session_state.prev_style = style_bucket
+        # reset defaults per style
+        if style_bucket == "Creator":
+            st.session_state["min_ram"]      = first_at_least(ram_opts, 16)
+            st.session_state["min_storage"]  = first_at_least(stor_opts, 1024)
+            st.session_state["min_refresh"]  = first_at_least(ref_opts, 60)
+            st.session_state["min_vram"]     = 0
+        elif style_bucket == "Gaming":
+            st.session_state["min_ram"]      = first_at_least(ram_opts, 8)
+            st.session_state["min_storage"]  = first_at_least(stor_opts, 512)
+            st.session_state["min_refresh"]  = first_at_least(ref_opts, 120)
+            st.session_state["min_vram"]     = first_at_least(vram_opts, 4)
+        else:  # Business
+            st.session_state["min_ram"]      = first_at_least(ram_opts, 16)
+            st.session_state["min_storage"]  = first_at_least(stor_opts, 512)
+            st.session_state["min_refresh"]  = first_at_least(ref_opts, 60)
+            st.session_state["min_vram"]     = 0
+        st.session_state["min_year"] = first_at_least(year_opts, 2019)
+
+    # sliders bound to session_state (UI and filtering stay consistent)
     with col1:
-        min_storage = st.select_slider("Min Storage (GB)", options=stor_opts, value=first_at_least(stor_opts, 512))
+        min_storage = st.select_slider(
+            "Min Storage (GB)", options=stor_opts,
+            key="min_storage", value=st.session_state.get("min_storage", first_at_least(stor_opts, 512))
+        )
         if style_bucket == "Gaming":
-            min_vram = st.select_slider("Min GPU VRAM (GB)", options=vram_opts, value=first_at_least(vram_opts, 4))
+            min_vram = st.select_slider(
+                "Min GPU VRAM (GB)", options=vram_opts,
+                key="min_vram", value=st.session_state.get("min_vram", first_at_least(vram_opts, 4))
+            )
         else:
-            min_vram = 0
-        min_year = st.select_slider("Min Release Year", options=year_opts, value=first_at_least(year_opts, 2019))
+            min_vram = 0  # not shown, but used below
+
+        min_year = st.select_slider(
+            "Min Release Year", options=year_opts,
+            key="min_year", value=st.session_state.get("min_year", first_at_least(year_opts, 2019))
+        )
+
     with col2:
-        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=first_at_least(ram_opts, 8))
-        min_refresh = st.select_slider("Min Refresh (Hz)", options=ref_opts, value=first_at_least(ref_opts, 60))
+        min_ram = st.select_slider(
+            "Min RAM (GB)", options=ram_opts,
+            key="min_ram", value=st.session_state.get("min_ram", first_at_least(ram_opts, 8))
+        )
+        min_refresh = st.select_slider(
+            "Min Refresh (Hz)", options=ref_opts,
+            key="min_refresh", value=st.session_state.get("min_refresh", first_at_least(ref_opts, 60))
+        )
 
 prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
     use_case=style_bucket,
-    min_ram=min_ram, min_storage=min_storage, min_vram=min_vram,
-    min_cpu_cores=4, min_year=min_year, min_refresh=min_refresh
+    min_ram=st.session_state["min_ram"],
+    min_storage=st.session_state["min_storage"],
+    min_vram=st.session_state.get("min_vram", 0) if style_bucket == "Gaming" else 0,
+    min_cpu_cores=4,
+    min_year=st.session_state["min_year"],
+    min_refresh=st.session_state["min_refresh"],
 )
 
 recs = None
