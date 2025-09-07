@@ -30,6 +30,8 @@ NUMERIC = [
 ]
 ALLOWED_LABELS = {"Business","Gaming","Creator"}  # ← we train/eval on these only
 
+ANY = "Any"
+
 # Data loading
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_sheet_csv(output="/tmp/laptops.csv"):
@@ -272,26 +274,36 @@ def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
 
 def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
     mask = pd.Series(True, index=df.index)
-    def ge(col, v): s = pd.to_numeric(df.get(col), errors="coerce"); return (s >= float(v)) | s.isna()
+
+    def ge(col, v):
+        s = pd.to_numeric(df.get(col), errors="coerce")
+        return s.notna() & (s >= float(v))
+
+    # price is always applied (since user always picks a budget)
     if "price_myr" in df.columns:
         price = pd.to_numeric(df["price_myr"], errors="coerce")
         lo, hi = float(prefs.get("budget_min", 0)), float(prefs.get("budget_max", float("inf")))
-        mask &= price.between(lo, hi, inclusive="both") | price.isna()
-    if prefs.get("min_ram") is not None: mask &= ge("ram_base_GB", prefs["min_ram"])
-    if prefs.get("min_storage") is not None: mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
-    if prefs.get("min_vram") is not None: mask &= ge("gpu_vram_GB", prefs["min_vram"])
-    if prefs.get("min_cpu_cores") is not None: mask &= ge("cpu_cores", prefs["min_cpu_cores"])
-    if prefs.get("min_year") is not None: mask &= ge("year", prefs["min_year"])
-    if prefs.get("min_refresh") is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
+        mask &= price.notna() & price.between(lo, hi, inclusive="both")
+
+    if prefs.get("min_ram")      is not None: mask &= ge("ram_base_GB", prefs["min_ram"])
+    if prefs.get("min_storage")  is not None: mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
+    if prefs.get("min_vram")     is not None: mask &= ge("gpu_vram_GB", prefs["min_vram"])
+    if prefs.get("min_cpu_cores")is not None: mask &= ge("cpu_cores", prefs["min_cpu_cores"])
+    if prefs.get("min_year")     is not None: mask &= ge("year", prefs["min_year"])
+    if prefs.get("min_refresh")  is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
+
     return mask
 
 def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
     errs = validate_prefs(prefs)
     if errs:
         st.error(" | ".join(errs)); return pd.DataFrame()
-    prefs2, notes = enforce_business_rules(prefs)
-    if notes: st.info(" ".join(notes))
 
+    # No auto-enforcement: use exactly what the user selected
+    prefs2, notes = dict(prefs), []
+    # (optional) show a gentle hint for learning purposes
+    if prefs2.get("use_case","").lower() == "creator" and all(prefs2.get(k) is None for k in ("min_ram","min_storage")):
+        st.info("Creator profile tip: ≥16 GB RAM and ≥1 TB storage often works best (filters optional).")
     mask = make_filter_mask(df, prefs2)
     view = df.loc[mask].copy()
     if view.empty: return view
@@ -303,7 +315,7 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
             st.warning("Content-based scoring unavailable (empty TF-IDF). Showing rule-based instead.")
             scores = rule_based_scores(view, prefs2.get("use_case"))
         else:
-            sim_all = compute_query_sim(vec, X, build_pref_query(prefs2))
+            sim_all = compute_query_sim(vec, X, build_pref_query(prefs2))  # uses style tokens but no hard filters
             sim = sim_all[mask.values]
             if algo == "Content-Based":
                 scores = sim
@@ -325,6 +337,7 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
         "display_size_in","display_resolution","display_refresh_Hz","display_panel",
         "battery_capacity_Wh","weight_kg","os","intended_use_case","score"
     ] if c in view.columns]
+
     return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
 
 def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int = 5):
@@ -540,72 +553,64 @@ if "prev_style" not in st.session_state:
 with st.expander("Advanced filters (optional)", expanded=False):
     col1, col2 = st.columns(2)
 
-    # options from data
-    ram_opts  = unique_nums(df, "ram_base_GB", as_int=True)
-    stor_opts = unique_nums(df, "storage_primary_capacity_GB", as_int=True)
-    vram_opts = unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)
-    year_opts = unique_nums(df, "year", as_int=True)
-    ref_opts  = unique_nums(df, "display_refresh_Hz", as_int=True)
+    # options from data (prepend "Any" sentinel)
+    ram_opts  = [ANY] + unique_nums(df, "ram_base_GB", as_int=True)
+    stor_opts = [ANY] + unique_nums(df, "storage_primary_capacity_GB", as_int=True)
+    vram_opts = [ANY] + unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)
+    year_opts = [ANY] + unique_nums(df, "year", as_int=True)
+    ref_opts  = [ANY] + unique_nums(df, "display_refresh_Hz", as_int=True)
 
-    # --- style-aware defaults (update when style changes) ---
+    # reset filters to "Any" when style changes
+    if "prev_style" not in st.session_state:
+        st.session_state.prev_style = style_bucket
     if st.session_state.prev_style != style_bucket:
         st.session_state.prev_style = style_bucket
-        # reset defaults per style
-        if style_bucket == "Creator":
-            st.session_state["min_ram"]      = first_at_least(ram_opts, 16)
-            st.session_state["min_storage"]  = first_at_least(stor_opts, 1024)
-            st.session_state["min_refresh"]  = first_at_least(ref_opts, 60)
-            st.session_state["min_vram"]     = 0
-        elif style_bucket == "Gaming":
-            st.session_state["min_ram"]      = first_at_least(ram_opts, 8)
-            st.session_state["min_storage"]  = first_at_least(stor_opts, 512)
-            st.session_state["min_refresh"]  = first_at_least(ref_opts, 120)
-            st.session_state["min_vram"]     = first_at_least(vram_opts, 4)
-        else:  # Business
-            st.session_state["min_ram"]      = first_at_least(ram_opts, 16)
-            st.session_state["min_storage"]  = first_at_least(stor_opts, 512)
-            st.session_state["min_refresh"]  = first_at_least(ref_opts, 60)
-            st.session_state["min_vram"]     = 0
-        st.session_state["min_year"] = first_at_least(year_opts, 2019)
+        st.session_state["min_storage"] = ANY
+        st.session_state["min_vram"]    = ANY
+        st.session_state["min_year"]    = ANY
+        st.session_state["min_ram"]     = ANY
+        st.session_state["min_refresh"] = ANY
 
-    # sliders bound to session_state (UI and filtering stay consistent)
     with col1:
         min_storage = st.select_slider(
             "Min Storage (GB)", options=stor_opts,
-            key="min_storage", value=st.session_state.get("min_storage", first_at_least(stor_opts, 512))
+            key="min_storage", value=st.session_state.get("min_storage", ANY)
         )
-        if style_bucket == "Gaming":
-            min_vram = st.select_slider(
-                "Min GPU VRAM (GB)", options=vram_opts,
-                key="min_vram", value=st.session_state.get("min_vram", first_at_least(vram_opts, 4))
-            )
-        else:
-            min_vram = 0  # not shown, but used below
+
+        # VRAM filter is available but optional for any style
+        min_vram = st.select_slider(
+            "Min GPU VRAM (GB)", options=vram_opts,
+            key="min_vram", value=st.session_state.get("min_vram", ANY)
+        )
 
         min_year = st.select_slider(
             "Min Release Year", options=year_opts,
-            key="min_year", value=st.session_state.get("min_year", first_at_least(year_opts, 2019))
+            key="min_year", value=st.session_state.get("min_year", ANY)
         )
 
     with col2:
         min_ram = st.select_slider(
             "Min RAM (GB)", options=ram_opts,
-            key="min_ram", value=st.session_state.get("min_ram", first_at_least(ram_opts, 8))
+            key="min_ram", value=st.session_state.get("min_ram", ANY)
         )
         min_refresh = st.select_slider(
             "Min Refresh (Hz)", options=ref_opts,
-            key="min_refresh", value=st.session_state.get("min_refresh", first_at_least(ref_opts, 60))
+            key="min_refresh", value=st.session_state.get("min_refresh", ANY)
         )
+        
+def _val(x):  # "Any" -> None, else the numeric value
+    return None if x == ANY else x
 
 prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
     use_case=style_bucket,
-    min_ram=st.session_state["min_ram"],
-    min_storage=st.session_state["min_storage"],
-    min_vram=st.session_state.get("min_vram", 0) if style_bucket == "Gaming" else 0,
+    min_ram=_val(st.session_state["min_ram"]),
+    min_storage=_val(st.session_state["min_storage"]),
+    min_vram=_val(st.session_state["min_vram"]),
     min_cpu_cores=4,
-    min_year=st.session_state["min_year"],
-    min_refresh=st.session_state["min_refresh"],
+    min_year=_val(st.session_state["min_year"]),
+    min_refresh=_val(st.session_state["min_refresh"]),
+    alpha=balance,  # if you still use it in scoring
 )
 
 recs = None
