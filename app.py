@@ -532,7 +532,6 @@ with st.container():
     style_choice = st.radio("Preferred style", STYLE_CHOICES, horizontal=True)
     style_bucket = STYLE_TO_BUCKET.get(style_choice, "Business")
 
-    balance = st.slider("Spec match", min_value=0.1, max_value=1.0, value=0.6, step=0.1)
     results_count = st.slider("How many results to show?", 3, 30, 10, 1)
 
 with st.expander("Advanced filters (optional)", expanded=False):
@@ -558,8 +557,7 @@ prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
     use_case=style_bucket,
     min_ram=min_ram, min_storage=min_storage, min_vram=min_vram,
-    min_cpu_cores=4, min_year=min_year, min_refresh=min_refresh,
-    alpha=balance
+    min_cpu_cores=4, min_year=min_year, min_refresh=min_refresh
 )
 
 recs = None
