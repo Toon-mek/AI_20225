@@ -57,6 +57,7 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             data[c] = np.nan if c in NUMERIC else ""
     data["model"] = data["model"].fillna("").astype(str)
     data = data[data["model"].str.len() > 0].copy()
+
     for c in NUMERIC:
         data[c] = pd.to_numeric(data[c], errors="coerce")
     for c in ["cpu_brand","gpu_brand","ram_type","storage_primary_type","display_resolution"]:
@@ -87,21 +88,25 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             numtok("BAT", r["battery_capacity_Wh"], "WH"), numtok("WT", r["weight_kg"], "KG"),
             tok(r["os"]), f"USE {tok(r['intended_use_case'])}", numtok("Y", r["year"])
         ]
-        text_parts.append(" ".join([p for p in parts if p]))
-    data["spec_text"] = text_parts
 
-    gpu = str(r["gpu_model"] or "").upper()
-    hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
-    res = str(r.get("display_resolution") or "").upper()
-    
-    is_discrete = any(x in gpu for x in ["RTX","GTX","RX","ARC"])
-    creator_res = any(x in res for x in ["2560","2880","3000","3200","3840","4K"])
-    
-    parts += [
-        "DISCRETE_GPU" if is_discrete else "IGPU",
-        "HZ120PLUS" if (pd.notna(hz) and hz >= 120) else "",
-        "CREATOR_RES" if creator_res else ""
-    ]
+        # --- engineered tokens (now correctly inside the loop) ---
+        gpu = str(r.get("gpu_model") or "").upper()
+        hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
+        res = str(r.get("display_resolution") or "").upper()
+
+        is_discrete = any(x in gpu for x in ["RTX","GTX","RX","ARC"])
+        creator_res = any(x in res for x in ["2560","2880","3000","3200","3840","4K"])
+
+        parts += [
+            "DISCRETE_GPU" if is_discrete else "IGPU",
+            "HZ120PLUS" if (pd.notna(hz) and hz >= 120) else "",
+            "CREATOR_RES" if creator_res else ""
+        ]
+        # ---------------------------------------------------------
+
+        text_parts.append(" ".join([p for p in parts if p]))
+
+    data["spec_text"] = text_parts
 
     key = ["model","year"] if "year" in data else ["model"]
     data = data.drop_duplicates(subset=key, keep="first")
@@ -211,7 +216,10 @@ def price_proximity(view: pd.DataFrame, lo: float, hi: float) -> np.ndarray:
 def build_pref_query(prefs: dict) -> str:
     parts = []
     u = (prefs.get("use_case") or "").lower()
-    if prefs.get("use_case"): parts += [f"USE {prefs['use_case']}"]
+
+    if prefs.get("use_case"):
+        parts += [f"USE {prefs['use_case']}"]
+
     if u == "gaming":
         parts += ["DISCRETE_GPU", "HZ120PLUS"]
     elif u == "creator":
@@ -219,13 +227,14 @@ def build_pref_query(prefs: dict) -> str:
     elif u == "business":
         parts += ["IGPU"]
     # numeric wishes
-    if prefs.get("min_ram"): parts += [f"RAM{prefs['min_ram']}GB"]
-    if prefs.get("min_vram"): parts += [f"VRAM{prefs['min_vram']}GB"]
-    if prefs.get("min_cpu_cores"): parts += [f"CORES{prefs['min_cpu_cores']}"]
-    if prefs.get("min_refresh"): parts += [f"HZ{prefs['min_refresh']}HZ"]
-    if prefs.get("min_storage"): parts += [f"SSD{prefs['min_storage']}GB"]
-    if prefs.get("min_year"): parts += [f"Y{prefs['min_year']}"]
-    return " ".join([p for p in parts if p])0
+    if prefs.get("min_ram"):        parts += [f"RAM{prefs['min_ram']}GB"]
+    if prefs.get("min_vram"):       parts += [f"VRAM{prefs['min_vram']}GB"]
+    if prefs.get("min_cpu_cores"):  parts += [f"CORES{prefs['min_cpu_cores']}"]
+    if prefs.get("min_refresh"):    parts += [f"HZ{prefs['min_refresh']}HZ"]
+    if prefs.get("min_storage"):    parts += [f"SSD{prefs['min_storage']}GB"]
+    if prefs.get("min_year"):       parts += [f"Y{prefs['min_year']}"]
+
+    return " ".join([p for p in parts if p])
 
 def validate_prefs(prefs: dict) -> list[str]:
     errs = []
