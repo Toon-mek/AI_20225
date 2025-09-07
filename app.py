@@ -258,7 +258,7 @@ def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
     if u in ("creator","content creation","video editing","designer"):
         p["min_ram"] = max(int(p.get("min_ram") or 0), 16)
         p["min_storage"] = max(int(p.get("min_storage") or 0), 1024)
-        notes.append("Creator profile: ≥16 GB RAM and ≥1 TB storage when available.")
+        notes.append("Creator profile: ≥16 GB RAM and ≥1 TB storage.")
     # budget sanity
     if p.get("budget_min") is not None and p.get("budget_max") is not None:
         try:
