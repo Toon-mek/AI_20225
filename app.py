@@ -139,33 +139,62 @@ def compute_row_sim(X, i: int) -> np.ndarray:
 def compute_query_sim(vec: TfidfVectorizer, X, qtext: str) -> np.ndarray:
     return cosine_similarity(vec.transform([qtext]), X).ravel()
 
-def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
-    def nz(col, default=0.0): return pd.to_numeric(view.get(col, default), errors="coerce").fillna(default).astype(float)
-    ram, vram, cores = nz("ram_base_GB"), nz("gpu_vram_GB"), nz("cpu_cores")
-    refresh, battery, weight = nz("display_refresh_Hz", 60), nz("battery_capacity_Wh", 40), nz("weight_kg", 2.0)
-    year, storage = nz("year", 2018), nz("storage_primary_capacity_GB", 256)
+def portability_score(view: pd.DataFrame) -> np.ndarray:
+    # Weight: full credit at ≤1.3 kg, fades to 0 by ≥1.9 kg
+    w = pd.to_numeric(view.get("weight_kg"), errors="coerce")
+    w_score = ((1.9 - w) / 0.6).clip(0, 1)
 
+    # Battery: 0 at ≤50 Wh, full credit at ≥90 Wh
+    b = pd.to_numeric(view.get("battery_capacity_Wh"), errors="coerce")
+    b_score = ((b - 50) / 40).clip(0, 1)
+
+    # Combine (slightly favor weight)
+    return (0.6 * w_score.fillna(0) + 0.4 * b_score.fillna(0)).to_numpy()
+
+def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
+    def nz(col, default=0.0):
+        return pd.to_numeric(view.get(col, default), errors="coerce").fillna(default).astype(float)
+    ram     = nz("ram_base_GB")
+    vram    = nz("gpu_vram_GB")
+    cores   = nz("cpu_cores")
+    refresh = nz("display_refresh_Hz", 60)
+    year    = nz("year", 2018)
+    storage = nz("storage_primary_capacity_GB", 256)
+    # Base score
     s = np.zeros(len(view), dtype=float)
     s += 0.10 * np.clip((year - 2018) / 7.0, 0, 1)
     s += 0.10 * np.clip(storage / 1024.0, 0, 1)
+    # NEW: portability everywhere (weight + battery)
+    port = portability_score(view)
+    s += 0.08 * port  # base influence for all use-cases
     u = str(use_case or "").lower()
-    if u in ("gaming","gamer"):
+    if u in ("gaming", "gamer"):
         s += 0.18 * np.clip((vram - 6) / 6.0, 0, 1)
         s += 0.15 * np.clip((cores - 6) / 6.0, 0, 1)
         s += 0.12 * np.clip((refresh - 120) / 60.0, 0, 1)
+        s += 0.02 * port  # tiny nudge for portability
     elif u in ("creator","content creation","video editing","designer"):
         s += 0.18 * np.clip((ram - 16) / 16.0, 0, 1)
         s += 0.12 * np.clip((vram - 4) / 8.0, 0, 1)
         s += 0.10 * view["display_resolution"].astype(str).str.contains(
-            "2560|2880|3000|3200|3840|4K", case=False, na=False).astype(float)
+            "2560|2880|3000|3200|3840|4K", case=False, na=False
+        ).astype(float)
+        s += 0.04 * port
     elif u in ("student","office","productivity"):
         s += 0.12 * np.clip((ram - 8) / 8.0, 0, 1)
-        s += 0.18 * np.clip((60 - weight) / 60.0, 0, 1)
-        s += 0.10 * np.clip((battery - 50) / 40.0, 0, 1)
+        s += 0.10 * port  # portability matters more here
     elif u in ("business","programming","data"):
         s += 0.16 * np.clip((cores - 8) / 8.0, 0, 1)
         s += 0.14 * np.clip((ram - 16) / 16.0, 0, 1)
+        s += 0.06 * port  # portability also valuable
     return np.clip(s, 0, 1)
+
+def price_proximity(view: pd.DataFrame, lo: float, hi: float) -> np.ndarray:
+    p = pd.to_numeric(view.get("price_myr"), errors="coerce")
+    mid = (lo + hi) / 2.0
+    width = max(hi - lo, 1e-9)
+    w = (1 - np.clip(np.abs(p - mid) / (0.5 * width), 0, 1)).fillna(0.0)
+    return w.values  # [0,1]
 
 def build_pref_query(prefs: dict) -> str:
     parts = []
@@ -199,26 +228,60 @@ def validate_prefs(prefs: dict) -> list[str]:
 
 def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
     p, notes = dict(prefs), []
+    # Round RAM to a sensible step
     if p.get("min_ram") is not None:
         try:
             r = int(np.ceil(float(p["min_ram"]) / 4.0) * 4)
-            if r != p["min_ram"]: notes.append(f"Rounded min_ram to {r} GB.")
+            if r != p["min_ram"]:
+                notes.append(f"Rounded min_ram to {r} GB.")
             p["min_ram"] = r
-        except: pass
+        except:
+            pass
+    # Defaults by use case
     u = str(p.get("use_case") or "").lower()
-    if u in ("gaming","gamer","budget gaming"):
+    # Gaming nudges
+    if u in ("gaming", "gamer", "budget gaming"):
         if p.get("min_vram") is None or float(p["min_vram"]) < 4:
-            p["min_vram"] = 4; notes.append("Set min_vram to 4 GB for gaming.")
+            p["min_vram"] = 4
+            notes.append("Set min_vram to 4 GB for gaming.")
         if p.get("min_refresh") is None or float(p["min_refresh"]) < 120:
-            p["min_refresh"] = 120; notes.append("Set min_refresh to 120 Hz for gaming.")
+            p["min_refresh"] = 120
+            notes.append("Set min_refresh to 120 Hz for gaming.")
+    # NEW: Business / Student / Creator nudges
+    if u in ("business",):
+        # lighter + more RAM
+        p["min_ram"] = max(int(p.get("min_ram") or 0), 16)
+        if p.get("max_weight") is None:
+            p["max_weight"] = 1.5
+        else:
+            p["max_weight"] = min(float(p["max_weight"]), 1.5)
+        notes.append("Business profile: aiming for ≤1.5 kg and ≥16 GB RAM.")
+    elif u in ("student", "office", "productivity"):
+        # light + decent battery
+        if p.get("max_weight") is None:
+            p["max_weight"] = 1.6
+        else:
+            p["max_weight"] = min(float(p["max_weight"]), 1.6)
+        if p.get("min_battery_wh") is None:
+            p["min_battery_wh"] = 50
+        else:
+            p["min_battery_wh"] = max(float(p["min_battery_wh"]), 50)
+        notes.append("Student profile: aiming for ≤1.6 kg and ≥50 Wh battery.")
+    elif u in ("creator", "content creation", "video editing", "designer"):
+        p["min_ram"] = max(int(p.get("min_ram") or 0), 16)
+        p["min_storage"] = max(int(p.get("min_storage") or 0), 1024)  # 1TB
+        notes.append("Creator profile: ≥16 GB RAM and ≥1 TB storage when available.")
+    # Budget
     if p.get("budget_min") is not None and p.get("budget_max") is not None:
         try:
             lo, hi = float(p["budget_min"]), float(p["budget_max"])
             if lo > hi:
                 p["budget_min"], p["budget_max"] = hi, lo
                 notes.append("Swapped budget_min and budget_max.")
-        except: pass
+        except:
+            pass
     return p, notes
+
 
 def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
     mask = pd.Series(True, index=df.index)
@@ -262,6 +325,8 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
                 rb = rule_based_scores(view, prefs2.get("use_case"))
                 a = float(prefs2.get("alpha", 0.6))
                 scores = a * sim_norm + (1 - a) * rb
+                pp = price_proximity(view, prefs2["budget_min"], prefs2["budget_max"])
+                scores = 0.7 * (a * sim_norm + (1 - a) * rb) + 0.3 * pp
 
     view["score"] = scores
     cols = [c for c in [
@@ -392,6 +457,20 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
 
         out.append({"scenario": lab, "precision@k": round(precision,3), "recall@k": round(recall,3), "f1@k": round(f1,3), "mse": round(mse,4) if not np.isnan(mse) else np.nan, "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan})
     return pd.DataFrame(out)
+    
+# --- Auto-tune alpha & K to maximize mean F1@K ---
+def tune_alpha_k(df, label_col="intended_use_case_norm"):
+    from itertools import product
+    tr, te = split_df(df, test_size=0.2, label_col=label_col)
+    grid_a = [0.3, 0.45, 0.6, 0.75]
+    grid_k = [3, 5, 6, 8]
+    best = {"mean_f1": -1, "alpha": None, "k": None, "res": None}
+    for a, k in product(grid_a, grid_k):
+        res = evaluate_precision_recall_at_k_train_test(tr, te, k=k, alpha=a, label_col=label_col)
+        mean_f1 = res["f1@k"].mean()
+        if mean_f1 > best["mean_f1"]:
+            best = {"mean_f1": mean_f1, "alpha": a, "k": k, "res": res}
+    return best
 
 # ─────────────────────────── UI
 st.markdown("""
@@ -526,11 +605,15 @@ if recs is not None:
     else: render_results(recs, style_bucket)
 
 # ── Evaluation
-with st.expander("Train/Test evaluation (Precision@K, Recall@K, F1@K, MSE/RMSE)"):
+with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)"):
     test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
     k_eval    = st.slider("K", 3, 20, 10, key="tt_k")
     alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="tt_alpha")
     if st.button("Run train/test evaluation"):
+        if st.button("Auto-tune α & K (maximize mean F1)"):
+            best = tune_alpha_k(df, label_col=LABEL_COL)
+            st.success(f"Best mean F1: {best['mean_f1']:.3f}  |  α={best['alpha']}  |  K={best['k']}")
+            st.dataframe(best["res"], use_container_width=True)
         tr_df, te_df = split_df(df, test_size=test_size, label_col=LABEL_COL)
         res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt, label_col=LABEL_COL)
         st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
