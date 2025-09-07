@@ -457,6 +457,12 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
 
         out.append({"scenario": lab, "precision@k": round(precision,3), "recall@k": round(recall,3), "f1@k": round(f1,3), "mse": round(mse,4) if not np.isnan(mse) else np.nan, "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan})
     return pd.DataFrame(out)
+
+@st.cache_data(show_spinner=False)
+def evaluate_fixed(df: pd.DataFrame, label_col: str, *, test_size=0.20, k=5, alpha=0.55):
+    tr_df, te_df = split_df(df, test_size=test_size, label_col=label_col)
+    res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k, alpha=alpha, label_col=label_col)
+    return res, len(tr_df), len(te_df), test_size, k, alpha
     
 # --- Auto-tune alpha & K to maximize mean F1@K ---
 def tune_alpha_k(df, label_col="intended_use_case_norm"):
@@ -603,25 +609,23 @@ if st.button("Show laptops"):
 if recs is not None:
     if recs.empty: st.warning("No matching laptops found for your choices.")
     else: render_results(recs, style_bucket)
+        
+# ── Performance
+with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
+    # choose any fixed settings you want to “freeze”
+    res, n_tr, n_te, TS, K_FIXED, A_FIXED = evaluate_fixed(
+        df, LABEL_COL, test_size=0.20, k=5, alpha=0.55
+    )
 
-# ── Evaluation
-with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)"):
-    test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
-    k_eval    = st.slider("K", 3, 20, 10, key="tt_k")
-    alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="tt_alpha")
-    if st.button("Run train/test evaluation"):
-        if st.button("Auto-tune α & K (maximize mean F1)"):
-            best = tune_alpha_k(df, label_col=LABEL_COL)
-            st.success(f"Best mean F1: {best['mean_f1']:.3f}  |  α={best['alpha']}  |  K={best['k']}")
-            st.dataframe(best["res"], use_container_width=True)
-        tr_df, te_df = split_df(df, test_size=test_size, label_col=LABEL_COL)
-        res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt, label_col=LABEL_COL)
-        st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
-        st.dataframe(res, width="stretch")
-        if not res.empty:
-            st.write(
-                f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f} | "
-                f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f} | "
-                f"**Mean F1@{k_eval}:** {res['f1@k'].mean():.3f} | "
-                f"**Mean MSE:** {res['mse'].mean():.4f} | **Mean RMSE:** {res['rmse'].mean():.4f}"
-            )
+    st.write(f"**Train:** {n_tr}  |  **Test:** {n_te}")
+    st.write(f"**Settings:** Test size = {TS:.2f}  |  K = {K_FIXED}  |  α = {A_FIXED:.2f}")
+
+    st.dataframe(res, use_container_width=True)
+
+    if not res.empty:
+        st.write(
+            f"**Mean Precision@{K_FIXED}:** {res['precision@k'].mean():.3f} | "
+            f"**Mean Recall@{K_FIXED}:** {res['recall@k'].mean():.3f} | "
+            f"**Mean F1@{K_FIXED}:** {res['f1@k'].mean():.3f} | "
+            f"**Mean MSE:** {res['mse'].mean():.4f} | **Mean RMSE:** {res['rmse'].mean():.4f}"
+        )
