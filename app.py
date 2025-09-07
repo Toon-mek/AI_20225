@@ -114,18 +114,17 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return data.reset_index(drop=True)
 
 def normalize_use_case(x: object) -> str:
-    """Return one of Business/Gaming/Creator/Student (pre-map)."""
     t = str(x or "").lower()
-    if any(k in t for k in ["game"]): return "Gaming"
-    if any(k in t for k in ["creator","content","video","design","workstation","pro"]): return "Creator"
-    if any(k in t for k in ["business","executive","programming","data"]): return "Business"
+    if any(k in t for k in ["gaming","gamer","game"]): return "Gaming"
+    if any(k in t for k in ["creator","content","video","design","workstation","edit","render"]): return "Creator"
+    if any(k in t for k in ["business","executive","programming","data","engineer","developer","coding"]): return "Business"
     if any(k in t for k in ["student","general","productivity","office","ultrabook","ultralight","portable","writer"]): return "Student"
     return "Student"
 
 # IMPORTANT: keep non-allowed labels as Student (don’t force to Business)
 def map_to_three(lab: str) -> str:
     lab = str(lab or "").strip()
-    return lab if lab in ALLOWED_LABELS else "Student"
+    return lab if lab in {"Business", "Gaming", "Creator"} else "Student"
 
 def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
     s = df.isna().sum()
@@ -454,20 +453,24 @@ def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: p
 
         hits_at_k = int(is_rel[:k].sum())
         total_rel = int(is_rel.sum())
+        if total_rel == 0:
+            # nothing to judge for this label in TEST; skip to avoid fake zeros
+            continue
+
         precision = hits_at_k / max(k, 1)
-        recall = hits_at_k / max(total_rel, 1)
+        recall = hits_at_k / total_rel
         f1 = (2*precision*recall/(precision+recall)) if (precision+recall) else 0.0
 
-        mse = float(np.mean((ranked["score"].to_numpy() - is_rel.astype(float)) ** 2)) if len(is_rel) else np.nan
-        rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
+        mse = float(np.mean((ranked["score"].to_numpy() - is_rel.astype(float)) ** 2))
+        rmse = float(np.sqrt(mse))
 
         out.append({
             "scenario": lab,
             "precision@k": round(precision,3),
             "recall@k": round(recall,3),
             "f1@k": round(f1,3),
-            "mse": round(mse,4) if not np.isnan(mse) else np.nan,
-            "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan
+            "mse": round(mse,4),
+            "rmse": round(rmse,4)
         })
     return pd.DataFrame(out)
 
@@ -627,6 +630,7 @@ if recs is not None:
 
 # ── Performance (fixed settings, no user tuning)
 with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
+    st.write(df["intended_use_case_norm"].value_counts())
     res, n_tr, n_te, TS, K_FIXED, A_FIXED = evaluate_fixed(
         df, LABEL_COL, test_size=0.30, k=5, alpha=0.55  # 70/30 split
     )
