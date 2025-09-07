@@ -121,23 +121,6 @@ def map_to_three(lab: str) -> str:
     lab = str(lab or "").strip()
     return lab if lab in {"Business", "Gaming", "Creator"} else "Student"
 
-def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
-    s = df.isna().sum()
-    out = pd.DataFrame({"column": s.index, "nulls": s.values})
-    out["pct"] = (out["nulls"] / max(len(df), 1)) * 100
-    return out.sort_values("nulls", ascending=False).reset_index(drop=True)
-
-def range_checks(df: pd.DataFrame) -> list[str]:
-    msgs = []
-    if "year" in df:
-        y = pd.to_numeric(df["year"], errors="coerce")
-        bad = ((y < 2010) | (y > 2026)) & y.notna()
-        if bad.any(): msgs.append(f"{int(bad.sum())} suspicious years (<2010 or >2026).")
-    if "price_myr" in df:
-        p = pd.to_numeric(df["price_myr"], errors="coerce")
-        if (p < 0).sum() > 0: msgs.append(f"{int((p < 0).sum())} negative prices.")
-    return msgs
-
 #  Features
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
@@ -496,21 +479,6 @@ if "intended_use_case" in df.columns:
     df[LABEL_COL] = df["intended_use_case"].apply(normalize_use_case).apply(map_to_three)
 else:
     df[LABEL_COL] = "Business"  # safe default into allowed set
-
-with st.expander("📋 Data validation & data quality checks", expanded=False):
-    issues = []
-    missing_in_raw = [c for c in EXPECTED if c not in raw.columns]
-    if missing_in_raw: issues.append(f"Missing in source file: {missing_in_raw}")
-    key_cols = [c for c in ["brand","series","model","year"] if c in df.columns]
-    if key_cols:
-        dup_count = df.duplicated(subset=key_cols, keep=False).sum()
-        if dup_count > 0: issues.append(f"{int(dup_count)} duplicate rows by {key_cols}.")
-    nulls = summarize_nulls(df)
-    if (nulls["nulls"] > 0).any():
-        st.write("**Null counts (post-clean):**"); st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
-    issues += range_checks(df)
-    if issues: st.error("• " + "\n• ".join(issues))
-    else: st.success("No data quality issues detected.")
 
 # Build TF-IDF space (for interactive recommendations)
 vec, X = build_tfidf(df["spec_text"])
