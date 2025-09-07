@@ -7,40 +7,15 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
+# ─────────────────────────── Config
+st.set_page_config(page_title="💻 Laptop Recommender (BMCS2009)", layout="wide")
 DATA_PATH = "laptop_dataset_expanded_myr_full_clean.csv"
 DRIVE_ID = "18QknTkpJ-O_26Aj41aRKoEiN6a34vX5VpcXyAkkObp4"
-GID = "418897947" 
+GID = "418897947"
 
-# Data loading
-@st.cache_data(show_spinner=False, ttl=24*3600)
-def download_sheet_csv(output="/tmp/laptops.csv"):
-    url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
-    try:
-        gdown.download(url, output, quiet=True, fuzzy=True)
-    except Exception as e:
-        raise FileNotFoundError(
-            f"Failed to download CSV from Google Sheets. "
-            f"Check DRIVE_ID='{DRIVE_ID}' and GID='{GID}'. Details: {e}"
-        )
-    p = Path(output)
-    if (not p.exists()) or p.stat().st_size == 0:
-        raise FileNotFoundError(
-            "Downloaded file is empty or missing. Verify the sheet is public/readable and the GID is correct."
-        )
-    return output
+STYLE_CHOICES = ["Business-look", "Gaming-look", "Creator-look"]
+STYLE_TO_BUCKET = {"Business-look": "Business", "Gaming-look": "Gaming", "Creator-look": "Creator"}
 
-@st.cache_data(show_spinner=False)
-def load_dataset() -> pd.DataFrame:
-    p = Path(DATA_PATH)
-    if p.exists():
-        return pd.read_csv(p, low_memory=False)
-    csv_path = download_sheet_csv("/tmp/laptops.csv")
-    try:
-        return pd.read_csv(csv_path, low_memory=False)
-    except Exception as e:
-        raise RuntimeError(f"Could not read CSV at {csv_path}. Parser/encoding issue? Details: {e}")
-
-# Prep / Utilities
 EXPECTED = [
     "brand","series","model","year",
     "cpu_brand","cpu_family","cpu_model","cpu_cores",
@@ -48,8 +23,7 @@ EXPECTED = [
     "ram_base_GB","ram_type",
     "storage_primary_type","storage_primary_capacity_GB",
     "display_size_in","display_resolution","display_refresh_Hz","display_panel",
-    "battery_capacity_Wh","weight_kg",
-    "os","price_myr","intended_use_case"
+    "battery_capacity_Wh","weight_kg","os","price_myr","intended_use_case"
 ]
 NUMERIC = [
     "year","cpu_cores","gpu_vram_GB","ram_base_GB",
@@ -57,13 +31,29 @@ NUMERIC = [
     "battery_capacity_Wh","weight_kg","price_myr"
 ]
 
+# ─────────────────────────── Data loading
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def download_sheet_csv(output="/tmp/laptops.csv"):
+    url = f"https://docs.google.com/spreadsheets/d/{DRIVE_ID}/export?format=csv&gid={GID}"
+    gdown.download(url, output, quiet=True, fuzzy=True)
+    p = Path(output)
+    if not p.exists() or p.stat().st_size == 0:
+        raise FileNotFoundError("Download failed or file empty. Check DRIVE_ID/GID and sharing.")
+    return output
+
+@st.cache_data(show_spinner=False)
+def load_dataset() -> pd.DataFrame:
+    p = Path(DATA_PATH)
+    if p.exists():
+        return pd.read_csv(p, low_memory=False)
+    return pd.read_csv(download_sheet_csv("/tmp/laptops.csv"), low_memory=False)
+
+# ─────────────────────────── Prep
 def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
-    # ensure columns exist
     for c in EXPECTED:
         if c not in data.columns:
             data[c] = np.nan if c in NUMERIC else ""
-    # normalize
     data["model"] = data["model"].fillna("").astype(str)
     data = data[data["model"].str.len() > 0].copy()
     for c in NUMERIC:
@@ -72,59 +62,45 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         data[c] = data[c].astype(str).str.upper()
     data["os"] = data["os"].astype(str).str.title()
 
-    # build a simple text field to drive TF-IDF (spec string)
-    def tok(name, val):
-        s = str(val).strip()
+    def tok(v): 
+        s = str(v).strip(); 
         return s if s else ""
-    def numtok(prefix, val, unit=""):
+    def numtok(prefix, v, unit=""):
         try:
-            if pd.isna(val): return ""
-            v = float(val)
-            if v.is_integer(): v = int(v)
-            return f"{prefix}{v}{unit}"
-        except Exception:
+            if pd.isna(v): return ""
+            x = float(v); x = int(x) if x.is_integer() else x
+            return f"{prefix}{x}{unit}"
+        except: 
             return ""
 
     text_parts = []
     for _, r in data.iterrows():
         parts = [
-            tok("brand", r["brand"]), tok("series", r["series"]), tok("model", r["model"]),
-            tok("cpu_brand", r["cpu_brand"]), tok("cpu_family", r["cpu_family"]), tok("cpu_model", r["cpu_model"]),
-            tok("gpu_brand", r["gpu_brand"]), tok("gpu_model", r["gpu_model"]),
-            numtok("RAM", r["ram_base_GB"], "GB"), tok("RAMTYPE", r["ram_type"]),
-            tok("STOR", r["storage_primary_type"]), numtok("SSD", r["storage_primary_capacity_GB"], "GB"),
-            numtok("SIZE", r["display_size_in"], "IN"), tok("RES", r["display_resolution"]),
-            numtok("HZ", r["display_refresh_Hz"], "HZ"), tok("PANEL", r["display_panel"]),
+            tok(r["brand"]), tok(r["series"]), tok(r["model"]),
+            tok(r["cpu_brand"]), tok(r["cpu_family"]), tok(r["cpu_model"]),
+            tok(r["gpu_brand"]), tok(r["gpu_model"]),
+            numtok("RAM", r["ram_base_GB"], "GB"), tok(r["ram_type"]),
+            tok(r["storage_primary_type"]), numtok("SSD", r["storage_primary_capacity_GB"], "GB"),
+            numtok("SIZE", r["display_size_in"], "IN"), tok(r["display_resolution"]),
+            numtok("HZ", r["display_refresh_Hz"], "HZ"), tok(r["display_panel"]),
             numtok("BAT", r["battery_capacity_Wh"], "WH"), numtok("WT", r["weight_kg"], "KG"),
-            tok("OS", r["os"]), tok("USE", r["intended_use_case"]), numtok("Y", r["year"])
+            tok(r["os"]), f"USE {tok(r['intended_use_case'])}", numtok("Y", r["year"])
         ]
-        text_parts.append(" ".join(p for p in parts if p))
+        text_parts.append(" ".join([p for p in parts if p]))
     data["spec_text"] = text_parts
 
-    # dedupe by model + year if present
-    if "year" in data:
-        data = data.drop_duplicates(subset=["model","year"], keep="first")
-    else:
-        data = data.drop_duplicates(subset=["model"], keep="first")
-
+    key = ["model","year"] if "year" in data else ["model"]
+    data = data.drop_duplicates(subset=key, keep="first")
     return data.reset_index(drop=True)
-
-BUCKETS = ["Gaming", "Student", "Creator", "Business"]
 
 def normalize_use_case(x: object) -> str:
     t = str(x or "").lower()
-    if any(k in t for k in ["game"]):                                  # gaming, budget gaming, gamer, gaming/creator...
-        return "Gaming"
-    if any(k in t for k in ["creator", "content", "video", "design", "workstation", "pro"]):
-        return "Creator"
-    if any(k in t for k in ["student", "general", "productivity", "office",
-                            "ultrabook", "ultralight", "portable", "writer"]):
-        return "Student"
-    if any(k in t for k in ["business", "executive", "programming", "data"]):
-        return "Business"
-    return "Student"  # default fallback so it doesn’t drop out
-    
-# === Step 4A: Data validation helpers (place right after prepare_df) ===
+    if any(k in t for k in ["game"]): return "Gaming"
+    if any(k in t for k in ["creator","content","video","design","workstation","pro"]): return "Creator"
+    if any(k in t for k in ["business","executive","programming","data"]): return "Business"
+    if any(k in t for k in ["student","general","productivity","office","ultrabook","ultralight","portable","writer"]): return "Student"
+    return "Student"
+
 def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
     s = df.isna().sum()
     out = pd.DataFrame({"column": s.index, "nulls": s.values})
@@ -133,260 +109,45 @@ def summarize_nulls(df: pd.DataFrame) -> pd.DataFrame:
 
 def range_checks(df: pd.DataFrame) -> list[str]:
     msgs = []
-    # year sanity
-    if "year" in df.columns:
+    if "year" in df:
         y = pd.to_numeric(df["year"], errors="coerce")
         bad = ((y < 2010) | (y > 2026)) & y.notna()
-        if bad.any():
-            msgs.append(f"{int(bad.sum())} rows with suspicious year (<2010 or >2026).")
-    # price sanity
-    if "price_myr" in df.columns:
+        if bad.any(): msgs.append(f"{int(bad.sum())} suspicious years (<2010 or >2026).")
+    if "price_myr" in df:
         p = pd.to_numeric(df["price_myr"], errors="coerce")
-        if (p < 0).sum() > 0:
-            msgs.append(f"{int((p < 0).sum())} rows with negative price.")
-        if p.notna().sum() > 0:
-            qhi = p.quantile(0.995)
-            if (p > qhi).sum() > 0:
-                msgs.append(f"{int((p > qhi).sum())} extreme price outliers (>99.5th percentile).")
-    # numeric spec sanity
-    bounds = [
-        ("ram_base_GB", 2, 128),
-        ("gpu_vram_GB", 0, 48),
-        ("cpu_cores", 1, 64),
-        ("storage_primary_capacity_GB", 64, 8192),
-        ("display_refresh_Hz", 30, 360),
-        ("weight_kg", 0.5, 6.0),
-    ]
-    for col, lo, hi in bounds:
-        if col in df.columns:
-            v = pd.to_numeric(df[col], errors="coerce")
-            bad = ((v < lo) | (v > hi)) & v.notna()
-            if bad.any():
-                msgs.append(f"{int(bad.sum())} values in '{col}' outside [{lo}, {hi}].")
+        if (p < 0).sum() > 0: msgs.append(f"{int((p < 0).sum())} negative prices.")
     return msgs
 
-STYLE_CHOICES = ["Business-look", "Gaming-look", "Creator-look"]
-STYLE_TO_BUCKET = {"Business-look": "Business", "Gaming-look": "Gaming", "Creator-look": "Creator"}
-
-def why_this(row: pd.Series, style_bucket: str) -> list[str]:
-    bullets = []
-    w = pd.to_numeric(row.get("weight_kg"), errors="coerce")
-    bat = pd.to_numeric(row.get("battery_capacity_Wh"), errors="coerce")
-    hz = pd.to_numeric(row.get("display_refresh_Hz"), errors="coerce")
-    vram = pd.to_numeric(row.get("gpu_vram_GB"), errors="coerce")
-    ram = pd.to_numeric(row.get("ram_base_GB"), errors="coerce")
-    res = str(row.get("display_resolution") or "")
-
-    # Always-on  hints
-    if pd.notna(w) and w <= 1.5: bullets.append("lightweight")
-    if pd.notna(bat) and bat >= 50: bullets.append("long battery life")
-
-    # Style nudges
-    sb = (style_bucket or "").lower()
-    if sb == "gaming":
-        if pd.notna(hz) and hz >= 120: bullets.append(f"{int(hz)} Hz display")
-        if pd.notna(vram) and vram >= 6: bullets.append(f"{int(vram)} GB VRAM")
-    elif sb == "creator":
-        if pd.notna(ram) and ram >= 16: bullets.append(f"{int(ram)} GB RAM")
-        if any(x in res for x in ["2560","2880","3000","3200","3840","4K"]): bullets.append("high-res screen")
-    elif sb == "business":
-        if pd.notna(w) and w <= 1.3: bullets.append("ultra-portable")
-        if pd.notna(bat) and bat >= 60: bullets.append("all-day battery")
-
-    # Clean up & cap
-    bullets = [b for b in bullets if b]
-    return bullets[:3] or ["balanced for everyday study"]
-
-def render_results(recs: pd.DataFrame, style_bucket: str):
-    for i, row in recs.iterrows():
-        # Title with numbering
-        title = f"### {i+1}. {row.get('brand','')} {row.get('series','')} {row.get('model','')}"
-        st.markdown(title)
-        # Price
-        price = pd.to_numeric(row.get("price_myr"), errors="coerce")
-        price_txt = f"{int(price):,}" if pd.notna(price) else "Unknown"
-        st.markdown(f"*Price (MYR):* {price_txt}")
-
-        # Spec lines (match your screenshot)
-        st.markdown(
-            f"*CPU:* {row.get('cpu_brand','')} {row.get('cpu_family','')} {row.get('cpu_model','')} | "
-            f"*Cores:* {row.get('cpu_cores','')}"
-        )
-        st.markdown(
-            f"*GPU:* {row.get('gpu_brand','')} {row.get('gpu_model','')} | "
-            f"*VRAM:* {row.get('gpu_vram_GB','0')} GB"
-        )
-        st.markdown(
-            f"*RAM:* {row.get('ram_base_GB','?')} GB {row.get('ram_type','')} | "
-            f"*Storage:* {row.get('storage_primary_capacity_GB','?')} GB {row.get('storage_primary_type','')}"
-        )
-        st.markdown(
-            f"*Display:* {row.get('display_size_in','?')}-inch {row.get('display_resolution','')} "
-            f"{row.get('display_refresh_Hz','')}Hz {row.get('display_panel','')}"
-        )
-        # Keep your rationale
-        why = why_this(row, style_bucket)
-        st.markdown("**Why it fits:** " + " • ".join(why))
-        # Full row if needed
-        with st.expander("Show/Hide more specs"):
-            st.write(row.to_frame().T)
-        st.markdown("---")
-
-def unique_nums(df, col, *, round_to=None, as_int=False, add_zero=False):
-    s = pd.to_numeric(df.get(col), errors="coerce").dropna()
-    if round_to:
-        s = (s / round_to).round() * round_to
-    vals = sorted(s.unique())
-    if as_int:
-        vals = [int(v) for v in vals]
-    if add_zero and (not vals or vals[0] != 0):
-        vals = [0] + [v for v in vals if v != 0]
-    return vals
-
-def first_at_least(options, target):
-    if not options: 
-        return target
-    for v in options:
-        if v >= target:
-            return v
-    return options[-1]
-
-# Content features (TF-IDF)
+# ─────────────────────────── Features / scoring
 @st.cache_resource(show_spinner=False)
 def build_tfidf(spec_text: pd.Series):
     s = spec_text.fillna("").astype(str)
     if not s.str.strip().any():
-        # All empty -> return empty matrix
         from scipy.sparse import csr_matrix
-        vec = TfidfVectorizer()
-        X = csr_matrix((len(s), 0))
-        return vec, X
+        return TfidfVectorizer(), csr_matrix((len(s), 0))
     try:
-        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2)
         X = vec.fit_transform(s)
     except ValueError:
-        # Fallback for tiny datasets
-        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1, stop_words=None)
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
         X = vec.fit_transform(s)
     return vec, X
 
-def compute_row_sim(_X, row_index: int) -> np.ndarray:
-    return cosine_similarity(_X[row_index], _X).ravel()
+def compute_row_sim(X, i: int) -> np.ndarray:
+    return cosine_similarity(X[i], X).ravel()
 
-def compute_query_sim(_vec: TfidfVectorizer, _X, query_text: str) -> np.ndarray:
-    q = _vec.transform([query_text])
-    return cosine_similarity(q, _X).ravel()
-    
-def split_df(df: pd.DataFrame,test_size: float = 0.2, random_state: int = 42, label_col: str = "intended_use_case_norm"):
-    # pick a valid label column
-    if label_col not in df.columns:
-        fallback = "intended_use_case"
-        if fallback in df.columns:
-            label_col = fallback
-        else:
-            tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
-            return tr.reset_index(drop=True), te.reset_index(drop=True)
+def compute_query_sim(vec: TfidfVectorizer, X, qtext: str) -> np.ndarray:
+    return cosine_similarity(vec.transform([qtext]), X).ravel()
 
-    y = df[label_col].astype(str).str.strip()
-    y = y.replace({"nan": "", "None": ""})
-    y = y.mask(y.eq(""), "unknown")
-
-    vc = y.value_counts()
-    rare = vc[vc < 2].index
-    if len(rare) > 0:
-        y = y.where(~y.isin(rare), "other")
-
-    n_test = max(1, int(round(len(df) * test_size)))
-    if y.nunique() > n_test:
-        order = y.value_counts(ascending=True).index
-        keep = set(order[-n_test:])
-        y = y.where(y.isin(keep), "other")
-
-    try:
-        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=y)
-    except ValueError:
-        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
-    return tr.reset_index(drop=True), te.reset_index(drop=True)
-
-def evaluate_precision_recall_at_k_train_test(
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    k: int = 10,
-    alpha: float = 0.6,
-    label_col: str = "intended_use_case_norm",
-) -> pd.DataFrame:
-    # --- Fit TF-IDF on TRAIN, apply to TEST ---
-    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, stop_words=None)
-    vec.fit(train_df["spec_text"].fillna(""))
-    X_test = vec.transform(test_df["spec_text"].fillna(""))
-
-    # labels to evaluate
-    if label_col in train_df and train_df[label_col].notna().any():
-        labels = sorted(x for x in train_df[label_col].astype(str).str.strip().unique() if x)
-    else:
-        labels = ["Gaming", "Student", "Creator", "Business"]
-
-    # simple budget window from TEST (for a realistic pool)
-    price = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
-    p = price.dropna()
-    lo, hi = (float(p.quantile(0.05)), float(p.quantile(0.95))) if len(p) >= 5 else (float(p.min()) if len(p) else 0.0, float(p.max()) if len(p) else 20000.0)
-    mask = price.between(lo, hi, inclusive="both") | price.isna()
-    view = test_df.loc[mask].copy()
-    Xv = X_test[mask.values]
-
-    out = []
-    for lab in labels:
-        # query from the scenario
-        prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4, min_year=2018, min_refresh=60)
-        q = vec.transform([build_pref_query(prefs)])
-        sim = cosine_similarity(q, Xv).ravel()
-        sim_norm = (sim - sim.min()) / (sim.max() - sim.min()) if sim.max() > sim.min() else sim
-        rb = rule_based_scores(view, lab)  # in [0,1]
-        scores = alpha * sim_norm + (1 - alpha) * rb  # predicted relevance ∈[0,1]
-
-        ranked = view.assign(score=scores).sort_values("score", ascending=False)
-        topk = ranked.head(k)
-
-        truth_col = label_col if label_col in ranked.columns else "intended_use_case"
-        y_true_all = (ranked[truth_col].astype(str).str.lower() == lab.lower()).astype(float).to_numpy()
-        y_pred_all = ranked["score"].to_numpy()
-
-        matched = int((topk[truth_col].astype(str).str.lower() == lab.lower()).sum())
-        precision = matched / max(k, 1)
-        recall = 1.0 if matched > 0 else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-
-        mse = float(np.mean((y_pred_all - y_true_all) ** 2)) if len(y_true_all) else np.nan
-        rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
-
-        out.append({
-            "scenario": lab,
-            "precision@k": round(precision, 3),
-            "recall@k": round(recall, 3),
-            "f1@k": round(f1, 3),
-            "mse": round(mse, 4) if not np.isnan(mse) else np.nan,
-            "rmse": round(rmse, 4) if not np.isnan(rmse) else np.nan,
-        })
-    return pd.DataFrame(out)
-
-# Rule-based scoring
 def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
-    def nz(col, default=0.0):
-        return pd.to_numeric(view.get(col, default), errors="coerce").fillna(default).astype(float)
-
-    ram = nz("ram_base_GB")
-    vram = nz("gpu_vram_GB")
-    cores = nz("cpu_cores")
-    refresh = nz("display_refresh_Hz", 60)
-    battery = nz("battery_capacity_Wh", 40)
-    weight = nz("weight_kg", 2.0)
-    year = nz("year", 2018)
-    storage = nz("storage_primary_capacity_GB", 256)
+    def nz(col, default=0.0): return pd.to_numeric(view.get(col, default), errors="coerce").fillna(default).astype(float)
+    ram, vram, cores = nz("ram_base_GB"), nz("gpu_vram_GB"), nz("cpu_cores")
+    refresh, battery, weight = nz("display_refresh_Hz", 60), nz("battery_capacity_Wh", 40), nz("weight_kg", 2.0)
+    year, storage = nz("year", 2018), nz("storage_primary_capacity_GB", 256)
 
     s = np.zeros(len(view), dtype=float)
     s += 0.10 * np.clip((year - 2018) / 7.0, 0, 1)
     s += 0.10 * np.clip(storage / 1024.0, 0, 1)
-
     u = str(use_case or "").lower()
     if u in ("gaming","gamer"):
         s += 0.18 * np.clip((vram - 6) / 6.0, 0, 1)
@@ -396,8 +157,7 @@ def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
         s += 0.18 * np.clip((ram - 16) / 16.0, 0, 1)
         s += 0.12 * np.clip((vram - 4) / 8.0, 0, 1)
         s += 0.10 * view["display_resolution"].astype(str).str.contains(
-            "2560|2880|3000|3200|3840|4K", case=False, na=False
-        ).astype(float)
+            "2560|2880|3000|3200|3840|4K", case=False, na=False).astype(float)
     elif u in ("student","office","productivity"):
         s += 0.12 * np.clip((ram - 8) / 8.0, 0, 1)
         s += 0.18 * np.clip((60 - weight) / 60.0, 0, 1)
@@ -407,30 +167,7 @@ def rule_based_scores(view: pd.DataFrame, use_case: str) -> np.ndarray:
         s += 0.14 * np.clip((ram - 16) / 16.0, 0, 1)
     return np.clip(s, 0, 1)
 
-# Recommenders
-def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int = 5):
-    idxs = df.index[df["model"].astype(str).str.lower() == selected_model.lower()].tolist()
-    if not idxs:
-        st.write("Model not found.")
-        return pd.DataFrame()
-
-    i = idxs[0]
-
-    # Guard: empty TF-IDF vocabulary
-    if getattr(X, "shape", (0, 0))[1] == 0:
-        st.warning("Similarity is unavailable (empty TF-IDF vocabulary). Add more text features or rows.")
-        return pd.DataFrame()
-
-    sim = compute_row_sim(X, i)
-    order = np.argsort(-sim)
-    order = [j for j in order if j != i][:top_n]
-
-    out = df.iloc[order].copy()
-    out["similarity"] = sim[order]
-    return out
-
 def build_pref_query(prefs: dict) -> str:
-    # build a "fake" spec text from user preferences
     parts = []
     if prefs.get("use_case"): parts += [f"USE {prefs['use_case']}"]
     if prefs.get("min_ram"): parts += [f"RAM{prefs['min_ram']}GB"]
@@ -439,149 +176,75 @@ def build_pref_query(prefs: dict) -> str:
     if prefs.get("min_refresh"): parts += [f"HZ{prefs['min_refresh']}HZ"]
     if prefs.get("min_storage"): parts += [f"SSD{prefs['min_storage']}GB"]
     if prefs.get("min_year"): parts += [f"Y{prefs['min_year']}"]
-    if prefs.get("min_battery_wh"): parts += [f"BAT{prefs['min_battery_wh']}WH"]
-    if prefs.get("max_weight"): parts += [f"WT{prefs['max_weight']}KG"]
     return " ".join(parts)
 
-# ---------- Validations & business rules for preferences ----------
 def validate_prefs(prefs: dict) -> list[str]:
-    """Return a list of error messages; empty list means OK."""
     errs = []
-    # numbers must be non-negative
-    for k in ["budget_min","budget_max","min_ram","min_storage","min_vram",
-              "min_cpu_cores","min_refresh","min_battery_wh","max_weight"]:
+    for k in ["budget_min","budget_max","min_ram","min_storage","min_vram","min_cpu_cores","min_refresh"]:
         if k in prefs and prefs[k] is not None:
             try:
-                v = float(prefs[k])
-                if v < 0:
-                    errs.append(f"{k} must be ≥ 0.")
-            except Exception:
-                errs.append(f"{k} must be a number.")
-
-    # budget range
+                if float(prefs[k]) < 0: errs.append(f"{k} must be ≥ 0.")
+            except: errs.append(f"{k} must be a number.")
     if "budget_min" in prefs and "budget_max" in prefs:
         try:
             if float(prefs["budget_min"]) > float(prefs["budget_max"]):
                 errs.append("budget_min cannot be greater than budget_max.")
-        except Exception:
-            pass
-
-    # sensible year
+        except: pass
     if prefs.get("min_year") is not None:
         try:
             y = int(prefs["min_year"])
-            if y < 2010 or y > 2035:
-                errs.append("min_year looks out of range (2010–2035).")
-        except Exception:
-            errs.append("min_year must be an integer.")
+            if y < 2010 or y > 2035: errs.append("min_year looks out of range (2010–2035).")
+        except: errs.append("min_year must be an integer.")
     return errs
 
 def enforce_business_rules(prefs: dict) -> tuple[dict, list[str]]:
-    """
-    Adjust questionable inputs to sensible values; return (adjusted_prefs, notes).
-    """
-    p = dict(prefs)  # copy
-    notes = []
-
-    # Round RAM to nearest 4 GB (up)
+    p, notes = dict(prefs), []
     if p.get("min_ram") is not None:
         try:
             r = int(np.ceil(float(p["min_ram"]) / 4.0) * 4)
-            if r != p["min_ram"]:
-                notes.append(f"Rounded min_ram to {r} GB.")
+            if r != p["min_ram"]: notes.append(f"Rounded min_ram to {r} GB.")
             p["min_ram"] = r
-        except Exception:
-            pass
-
-    # Gaming defaults
+        except: pass
     u = str(p.get("use_case") or "").lower()
     if u in ("gaming","gamer","budget gaming"):
         if p.get("min_vram") is None or float(p["min_vram"]) < 4:
-            p["min_vram"] = 4
-            notes.append("Set min_vram to 4 GB for gaming.")
+            p["min_vram"] = 4; notes.append("Set min_vram to 4 GB for gaming.")
         if p.get("min_refresh") is None or float(p["min_refresh"]) < 120:
-            p["min_refresh"] = 120
-            notes.append("Set min_refresh to 120 Hz for gaming.")
-
-    # Weight sanity
-    if p.get("max_weight") is not None:
-        try:
-            w = float(p["max_weight"])
-            if w < 0.8:
-                p["max_weight"] = 0.8
-                notes.append("Raised max_weight to 0.8 kg (very light).")
-            elif w > 6.0:
-                p["max_weight"] = 6.0
-                notes.append("Capped max_weight at 6.0 kg.")
-        except Exception:
-            pass
-
-    # Budget sanity
+            p["min_refresh"] = 120; notes.append("Set min_refresh to 120 Hz for gaming.")
     if p.get("budget_min") is not None and p.get("budget_max") is not None:
         try:
             lo, hi = float(p["budget_min"]), float(p["budget_max"])
             if lo > hi:
                 p["budget_min"], p["budget_max"] = hi, lo
                 notes.append("Swapped budget_min and budget_max.")
-        except Exception:
-            pass
-
+        except: pass
     return p, notes
 
 def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
     mask = pd.Series(True, index=df.index)
-
-    def ge(col, v):
-        s = pd.to_numeric(df.get(col), errors="coerce")
-        return (s >= float(v)) | s.isna()
-
-    def le(col, v):
-        s = pd.to_numeric(df.get(col), errors="coerce")
-        return (s <= float(v)) | s.isna()
-
-    # Budget
+    def ge(col, v): s = pd.to_numeric(df.get(col), errors="coerce"); return (s >= float(v)) | s.isna()
     if "price_myr" in df.columns:
         price = pd.to_numeric(df["price_myr"], errors="coerce")
-        lo = float(prefs.get("budget_min", 0))
-        hi = float(prefs.get("budget_max", float("inf")))
-        mask &= (price.between(lo, hi, inclusive="both")) | price.isna()
-
-    # Numeric mins
-    if prefs.get("min_ram") is not None:
-        mask &= ge("ram_base_GB", prefs["min_ram"])
-    if prefs.get("min_storage") is not None:
-        mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
-    if prefs.get("min_vram") is not None:
-        mask &= ge("gpu_vram_GB", prefs["min_vram"])
-    if prefs.get("min_cpu_cores") is not None:
-        mask &= ge("cpu_cores", prefs["min_cpu_cores"])
-    if prefs.get("min_year") is not None:
-        mask &= ge("year", prefs["min_year"])
-    if prefs.get("min_refresh") is not None:
-        mask &= ge("display_refresh_Hz", prefs["min_refresh"])
-    if prefs.get("min_battery_wh") is not None:
-        mask &= ge("battery_capacity_Wh", prefs["min_battery_wh"])
-
-    # Max weight
-    if prefs.get("max_weight") is not None:
-        mask &= le("weight_kg", prefs["max_weight"])
-
+        lo, hi = float(prefs.get("budget_min", 0)), float(prefs.get("budget_max", float("inf")))
+        mask &= price.between(lo, hi, inclusive="both") | price.isna()
+    if prefs.get("min_ram") is not None: mask &= ge("ram_base_GB", prefs["min_ram"])
+    if prefs.get("min_storage") is not None: mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
+    if prefs.get("min_vram") is not None: mask &= ge("gpu_vram_GB", prefs["min_vram"])
+    if prefs.get("min_cpu_cores") is not None: mask &= ge("cpu_cores", prefs["min_cpu_cores"])
+    if prefs.get("min_year") is not None: mask &= ge("year", prefs["min_year"])
+    if prefs.get("min_refresh") is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
     return mask
 
 def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: int = 10) -> pd.DataFrame:
     errs = validate_prefs(prefs)
     if errs:
-        st.error(" | ".join(errs))
-        return pd.DataFrame()
-
+        st.error(" | ".join(errs)); return pd.DataFrame()
     prefs2, notes = enforce_business_rules(prefs)
-    if notes:
-        st.info(" ".join(notes))
+    if notes: st.info(" ".join(notes))
 
     mask = make_filter_mask(df, prefs2)
     view = df.loc[mask].copy()
-    if view.empty:
-        return view
+    if view.empty: return view
 
     if algo == "Rule-Based":
         scores = rule_based_scores(view, prefs2.get("use_case"))
@@ -590,15 +253,12 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
             st.warning("Content-based scoring unavailable (empty TF-IDF). Showing rule-based instead.")
             scores = rule_based_scores(view, prefs2.get("use_case"))
         else:
-            query = build_pref_query(prefs2)
-            sim_all = compute_query_sim(vec, X, query)
+            sim_all = compute_query_sim(vec, X, build_pref_query(prefs2))
             sim = sim_all[mask.values]
-
             if algo == "Content-Based":
                 scores = sim
             else:
-                rng = np.ptp(sim)
-                sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
+                rng = np.ptp(sim); sim_norm = (sim - np.min(sim)) / (rng if rng else 1.0)
                 rb = rule_based_scores(view, prefs2.get("use_case"))
                 a = float(prefs2.get("alpha", 0.6))
                 scores = a * sim_norm + (1 - a) * rb
@@ -615,7 +275,125 @@ def recommend_by_prefs(df: pd.DataFrame, vec, X, prefs: dict, algo: str, top_n: 
     ] if c in view.columns]
     return view.sort_values("score", ascending=False).head(top_n)[cols].reset_index(drop=True)
 
-# UI
+def recommend_similar(df: pd.DataFrame, vec, X, selected_model: str, top_n: int = 5):
+    idxs = df.index[df["model"].astype(str).str.lower() == selected_model.lower()].tolist()
+    if not idxs: st.write("Model not found."); return pd.DataFrame()
+    i = idxs[0]
+    if getattr(X, "shape", (0, 0))[1] == 0:
+        st.warning("Similarity unavailable (empty TF-IDF)."); return pd.DataFrame()
+    sim = compute_row_sim(X, i)
+    order = [j for j in np.argsort(-sim) if j != i][:top_n]
+    out = df.iloc[order].copy(); out["similarity"] = sim[order]
+    return out
+
+def why_this(row: pd.Series, style_bucket: str) -> list[str]:
+    bullets = []
+    w = pd.to_numeric(row.get("weight_kg"), errors="coerce")
+    bat = pd.to_numeric(row.get("battery_capacity_Wh"), errors="coerce")
+    hz = pd.to_numeric(row.get("display_refresh_Hz"), errors="coerce")
+    vram = pd.to_numeric(row.get("gpu_vram_GB"), errors="coerce")
+    ram = pd.to_numeric(row.get("ram_base_GB"), errors="coerce")
+    res = str(row.get("display_resolution") or "")
+    if pd.notna(w) and w <= 1.5: bullets.append("lightweight")
+    if pd.notna(bat) and bat >= 50: bullets.append("long battery life")
+    sb = (style_bucket or "").lower()
+    if sb == "gaming":
+        if pd.notna(hz) and hz >= 120: bullets.append(f"{int(hz)} Hz display")
+        if pd.notna(vram) and vram >= 6: bullets.append(f"{int(vram)} GB VRAM")
+    elif sb == "creator":
+        if pd.notna(ram) and ram >= 16: bullets.append(f"{int(ram)} GB RAM")
+        if any(x in res for x in ["2560","2880","3000","3200","3840","4K"]): bullets.append("high-res screen")
+    elif sb == "business":
+        if pd.notna(w) and w <= 1.3: bullets.append("ultra-portable")
+        if pd.notna(bat) and bat >= 60: bullets.append("all-day battery")
+    return (bullets[:3] or ["balanced for everyday study"])
+
+def render_results(recs: pd.DataFrame, style_bucket: str):
+    for i, row in recs.iterrows():
+        st.markdown(f"### {i+1}. {row.get('brand','')} {row.get('series','')} {row.get('model','')}")
+        price = pd.to_numeric(row.get("price_myr"), errors="coerce")
+        st.markdown(f"*Price (MYR):* {int(price):,}" if pd.notna(price) else "*Price (MYR):* Unknown")
+        st.markdown(f"*CPU:* {row.get('cpu_brand','')} {row.get('cpu_family','')} {row.get('cpu_model','')} | *Cores:* {row.get('cpu_cores','')}")
+        st.markdown(f"*GPU:* {row.get('gpu_brand','')} {row.get('gpu_model','')} | *VRAM:* {row.get('gpu_vram_GB','0')} GB")
+        st.markdown(f"*RAM:* {row.get('ram_base_GB','?')} GB {row.get('ram_type','')} | *Storage:* {row.get('storage_primary_capacity_GB','?')} GB {row.get('storage_primary_type','')}")
+        st.markdown(f"*Display:* {row.get('display_size_in','?')}-inch {row.get('display_resolution','')} {row.get('display_refresh_Hz','')}Hz {row.get('display_panel','')}")
+        st.markdown("**Why it fits:** " + " • ".join(why_this(row, style_bucket)))
+        with st.expander("Show/Hide more specs"): st.write(row.to_frame().T)
+        st.markdown("---")
+
+def unique_nums(df, col, *, round_to=None, as_int=False, add_zero=False):
+    s = pd.to_numeric(df.get(col), errors="coerce").dropna()
+    if round_to: s = (s / round_to).round() * round_to
+    vals = sorted(s.unique())
+    if as_int: vals = [int(v) for v in vals]
+    if add_zero and (not vals or vals[0] != 0): vals = [0] + [v for v in vals if v != 0]
+    return vals
+
+def first_at_least(options, target):
+    if not options: return target
+    for v in options:
+        if v >= target: return v
+    return options[-1]
+
+# ─────────────────────────── Evaluation
+def split_df(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42, label_col: str = "intended_use_case_norm"):
+    if label_col not in df.columns:
+        if "intended_use_case" in df.columns: label_col = "intended_use_case"
+        else: 
+            tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
+            return tr.reset_index(drop=True), te.reset_index(drop=True)
+    y = df[label_col].astype(str).str.strip().replace({"nan":"","None":""})
+    y = y.mask(y.eq(""), "unknown")
+    vc = y.value_counts(); rare = vc[vc < 2].index
+    if len(rare) > 0: y = y.where(~y.isin(rare), "other")
+    try:
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=y)
+    except ValueError:
+        tr, te = train_test_split(df, test_size=test_size, random_state=random_state, stratify=None)
+    return tr.reset_index(drop=True), te.reset_index(drop=True)
+
+def evaluate_precision_recall_at_k_train_test(train_df: pd.DataFrame, test_df: pd.DataFrame, k: int = 10, alpha: float = 0.6, label_col: str = "intended_use_case_norm") -> pd.DataFrame:
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2); vec.fit(train_df["spec_text"].fillna(""))
+    X_test = vec.transform(test_df["spec_text"].fillna(""))
+
+    if label_col in train_df and train_df[label_col].notna().any():
+        labels = sorted(x for x in train_df[label_col].astype(str).str.strip().unique() if x)
+    else:
+        labels = ["Gaming","Student","Creator","Business"]
+
+    price = pd.to_numeric(test_df.get("price_myr"), errors="coerce")
+    p = price.dropna()
+    lo, hi = (float(p.quantile(0.05)), float(p.quantile(0.95))) if len(p) >= 5 else (float(p.min()) if len(p) else 0.0, float(p.max()) if len(p) else 20000.0)
+    mask = price.between(lo, hi, inclusive="both") | price.isna()
+    view, Xv = test_df.loc[mask].copy(), X_test[mask.values]
+
+    out = []
+    for lab in labels:
+        prefs = dict(use_case=lab, min_ram=8, min_storage=512, min_vram=0, min_cpu_cores=4, min_year=2018, min_refresh=60)
+        sim = cosine_similarity(vec.transform([build_pref_query(prefs)]), Xv).ravel()
+        sim_norm = (sim - sim.min()) / (sim.max() - sim.min()) if sim.max() > sim.min() else sim
+        rb = rule_based_scores(view, lab)
+        scores = alpha * sim_norm + (1 - alpha) * rb
+
+        ranked = view.assign(score=scores).sort_values("score", ascending=False)
+        topk = ranked.head(k)
+
+        truth_col = label_col if label_col in ranked.columns else "intended_use_case"
+        y_true_all = (ranked[truth_col].astype(str).str.lower() == lab.lower()).astype(float).to_numpy()
+        y_pred_all = ranked["score"].to_numpy()
+
+        matched = int((topk[truth_col].astype(str).str.lower() == lab.lower()).sum())
+        precision = matched / max(k, 1)
+        recall = 1.0 if matched > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        mse = float(np.mean((y_pred_all - y_true_all) ** 2)) if len(y_true_all) else np.nan
+        rmse = float(np.sqrt(mse)) if not np.isnan(mse) else np.nan
+
+        out.append({"scenario": lab, "precision@k": round(precision,3), "recall@k": round(recall,3), "f1@k": round(f1,3), "mse": round(mse,4) if not np.isnan(mse) else np.nan, "rmse": round(rmse,4) if not np.isnan(rmse) else np.nan})
+    return pd.DataFrame(out)
+
+# ─────────────────────────── UI
 st.markdown("""
 <style>
 h1, h2, h3 { font-family: 'Helvetica Neue', sans-serif; }
@@ -626,81 +404,67 @@ h1, h2, h3 { font-family: 'Helvetica Neue', sans-serif; }
 
 with st.sidebar:
     if st.button("🔄 Clear cache & rerun"):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
+        st.cache_data.clear(); st.cache_resource.clear(); st.rerun()
+
 st.title("💻 Laptop Recommender")
 
 # Load + prep
 try:
     raw = load_dataset()
 except Exception as e:
-    st.error(str(e))
-    st.stop()
+    st.error(str(e)); st.stop()
 
 df = prepare_df(raw)
 st.caption(f"{len(df)} laptops loaded from {'local file' if Path(DATA_PATH).exists() else 'Google Drive (cached)'}")
 LABEL_COL = "intended_use_case_norm"
-if "intended_use_case" in df.columns:
-    df[LABEL_COL] = df["intended_use_case"].apply(normalize_use_case)
-else:
-    df[LABEL_COL] = "Student"
+df[LABEL_COL] = (df["intended_use_case"].apply(normalize_use_case) if "intended_use_case" in df.columns else "Student")
 
 with st.expander("📋 Data validation & data quality checks", expanded=False):
     issues = []
     missing_in_raw = [c for c in EXPECTED if c not in raw.columns]
-    if missing_in_raw:
-        issues.append(f"Missing in source file: {missing_in_raw}")
-    key_cols = [c for c in ["brand", "series", "model", "year"] if c in df.columns]
+    if missing_in_raw: issues.append(f"Missing in source file: {missing_in_raw}")
+    key_cols = [c for c in ["brand","series","model","year"] if c in df.columns]
     if key_cols:
         dup_count = df.duplicated(subset=key_cols, keep=False).sum()
-        if dup_count > 0:
-            issues.append(f"{int(dup_count)} duplicate rows by {key_cols}.")
+        if dup_count > 0: issues.append(f"{int(dup_count)} duplicate rows by {key_cols}.")
     nulls = summarize_nulls(df)
     if (nulls["nulls"] > 0).any():
-        st.write("**Null counts (post-clean):**")
-        st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
+        st.write("**Null counts (post-clean):**"); st.dataframe(nulls[nulls["nulls"] > 0], width="stretch")
     issues += range_checks(df)
-    if issues:
-        st.error("• " + "\n• ".join(issues))
-    else:
-        st.success("No data quality issues detected.")
+    if issues: st.error("• " + "\n• ".join(issues))
+    else: st.success("No data quality issues detected.")
 
 # Build TF-IDF space
 vec, X = build_tfidf(df["spec_text"])
 
-# -------- Search block (like your previous project) --------
+# ── Search block
 search_term = st.text_input("Search for a Laptop Model or Brand 🔎").strip()
 if search_term:
     found = df[
         df["model"].str.contains(search_term, case=False, na=False) |
         df["brand"].str.contains(search_term, case=False, na=False) |
         df["series"].str.contains(search_term, case=False, na=False)
-    ].copy()
+    ].copy().sort_values(by=["brand","series","model"]).reset_index(drop=True)
 
-    found = found.sort_values(by=["brand","series","model"]).reset_index(drop=True)
     if found.empty:
         st.write("No laptops found for that search.")
     else:
         st.write(f"### Search Results for: {search_term}")
         for idx, row in found.head(30).iterrows():
-            with st.container():
-                st.markdown(f"<h3><b>{idx+1}. {row['brand']} {row['series']} {row['model']}</b></h3>", unsafe_allow_html=True)
-                st.markdown(f"*Price (MYR):* {row['price_myr'] if pd.notna(row['price_myr']) else 'Unknown'}")
-                st.markdown(f"*CPU:* {row['cpu_brand']} {row['cpu_family']} {row['cpu_model']}  |  *Cores:* {row['cpu_cores']}")
-                st.markdown(f"*GPU:* {row['gpu_brand']} {row['gpu_model']}  |  *VRAM:* {row['gpu_vram_GB']} GB")
-                st.markdown(f"*RAM:* {row['ram_base_GB']} GB {row['ram_type']}  |  *Storage:* {row['storage_primary_capacity_GB']} GB {row['storage_primary_type']}")
-                st.markdown(f"*Display:* {row['display_size_in']}-inch {row['display_resolution']} {row['display_refresh_Hz']}Hz {row['display_panel']}")
-                with st.expander("Show/Hide more specs"):
-                    st.write(row.to_frame().T)
-                st.markdown("---")
+            st.markdown(f"<h3><b>{idx+1}. {row['brand']} {row['series']} {row['model']}</b></h3>", unsafe_allow_html=True)
+            st.markdown(f"*Price (MYR):* {row['price_myr'] if pd.notna(row['price_myr']) else 'Unknown'}")
+            st.markdown(f"*CPU:* {row['cpu_brand']} {row['cpu_family']} {row['cpu_model']}  |  *Cores:* {row['cpu_cores']}")
+            st.markdown(f"*GPU:* {row['gpu_brand']} {row['gpu_model']}  |  *VRAM:* {row['gpu_vram_GB']} GB")
+            st.markdown(f"*RAM:* {row['ram_base_GB']} GB {row['ram_type']}  |  *Storage:* {row['storage_primary_capacity_GB']} GB {row['storage_primary_type']}")
+            st.markdown(f"*Display:* {row['display_size_in']}-inch {row['display_resolution']} {row['display_refresh_Hz']}Hz {row['display_panel']}")
+            with st.expander("Show/Hide more specs"): st.write(row.to_frame().T)
+            st.markdown("---")
 
         choice_list = found["model"].head(50).tolist()
         selected_model = st.selectbox("Select a model to get similar laptops 🎧", choice_list)
         if st.button("Recommend Similar Laptops"):
             rec_sim = recommend_similar(df, vec, X, selected_model, top_n=5)
-            if rec_sim.empty:
-                st.write("No similar items found.")
+            if rec_sim.empty: st.write("No similar items found.")
             else:
                 st.write(f"### Similar to **{selected_model}**")
                 for k, r in enumerate(rec_sim.itertuples(index=False), 1):
@@ -709,119 +473,72 @@ if search_term:
                     st.markdown(f"*RAM/Storage:* {r.ram_base_GB}GB / {r.storage_primary_capacity_GB}GB {r.storage_primary_type} | *Price:* {r.price_myr}")
                     st.markdown("---")
 
-# -------- Preference block (rule/content/hybrid) --------
+# ── Preference block
 st.write("## Find laptops for school")
-
 with st.container():
-    # 1) Budget
-    price_min = int(max(0, pd.to_numeric(df["price_myr"], errors="coerce").min(skipna=True))) if "price_myr" in df else 0
-    price_max = int(min(20000, pd.to_numeric(df["price_myr"], errors="coerce").max(skipna=True))) if "price_myr" in df else 20000
     pc = pd.to_numeric(df.get("price_myr"), errors="coerce").dropna().astype(int)
     if pc.empty:
-        # safe fallback if the column is missing/empty
         budget = (1500, 8000)
     else:
         price_options = sorted(pd.unique(pc))
-        # default to full range (you can change to 25–75th percentile if you like)
-        default_range = (price_options[0], price_options[-1])
-        budget = st.select_slider(
-            "Budget (MYR)",
-            options=price_options,          # only values that exist in the data
-            value=default_range
-        )
+        budget = st.select_slider("Budget (MYR)", options=price_options, value=(price_options[0], price_options[-1]))
 
-    # 2) Style
     style_choice = st.radio("Preferred style", STYLE_CHOICES, horizontal=True)
     style_bucket = STYLE_TO_BUCKET.get(style_choice, "Student")
-    min_vram_default = 4 if style_bucket == "Gaming" else 0
 
-    # 3) Balance slider (replaces Hybrid α)
     balance = st.slider("Spec match", min_value=0.1, max_value=1.0, value=0.6, step=0.1)
-
-    # 4) How many to show (replaces Top N)
     results_count = st.slider("How many results to show?", 3, 30, 10, 1)
 
-# Advanced (optional must-haves)
 with st.expander("Advanced filters (optional)", expanded=False):
     col1, col2 = st.columns(2)
-
-    # Build option lists from the dataset
-    ram_opts      = unique_nums(df, "ram_base_GB", as_int=True)
-    stor_opts     = unique_nums(df, "storage_primary_capacity_GB", as_int=True)
-    vram_opts     = unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)  # includes 0 = no requirement
-    year_opts     = unique_nums(df, "year", as_int=True)
-    refresh_opts  = unique_nums(df, "display_refresh_Hz", as_int=True)
-    batt_opts     = unique_nums(df, "battery_capacity_Wh", as_int=True, add_zero=True)
-    weight_opts   = unique_nums(df, "weight_kg", round_to=0.1)  # one-decimal steps from your data
+    ram_opts  = unique_nums(df, "ram_base_GB", as_int=True)
+    stor_opts = unique_nums(df, "storage_primary_capacity_GB", as_int=True)
+    vram_opts = unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)
+    year_opts = unique_nums(df, "year", as_int=True)
+    ref_opts  = unique_nums(df, "display_refresh_Hz", as_int=True)
 
     with col1:
-        # Min Storage
-        default_stor = first_at_least(stor_opts, 512)
-        min_storage = st.select_slider("Min Storage (GB)", options=stor_opts, value=default_stor)
-        # Min VRAM (only show for Gaming)
+        min_storage = st.select_slider("Min Storage (GB)", options=stor_opts, value=first_at_least(stor_opts, 512))
         if style_bucket == "Gaming":
-            default_vram = first_at_least(vram_opts, 4)  # e.g., 0,4,6,8,12 → picks 4
-            min_vram = st.select_slider("Min GPU VRAM (GB)", options=vram_opts, value=default_vram)
+            min_vram = st.select_slider("Min GPU VRAM (GB)", options=vram_opts, value=first_at_least(vram_opts, 4))
         else:
-            min_vram = 0  # no VRAM requirement for non-gaming
-        # Min Year
-        default_year = first_at_least(year_opts, 2019)
-        min_year = st.select_slider("Min Release Year", options=year_opts, value=default_year)
-
+            min_vram = 0
+        min_year = st.select_slider("Min Release Year", options=year_opts, value=first_at_least(year_opts, 2019))
     with col2:
-        # Min RAM
-        default_ram = first_at_least(ram_opts, 8)
-        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=default_ram)
-        # Min Refresh
-        default_refresh = first_at_least(refresh_opts, 60)
-        min_refresh = st.select_slider("Min Refresh (Hz)", options=refresh_opts, value=default_refresh)
+        min_ram = st.select_slider("Min RAM (GB)", options=ram_opts, value=first_at_least(ram_opts, 8))
+        min_refresh = st.select_slider("Min Refresh (Hz)", options=ref_opts, value=first_at_least(ref_opts, 60))
 
-# Build prefs for the engine
 prefs = dict(
     budget_min=budget[0], budget_max=budget[1],
     use_case=style_bucket,
     min_ram=min_ram, min_storage=min_storage, min_vram=min_vram,
-    min_cpu_cores=4,  # or expose as a control if you like
-    min_year=min_year, min_refresh=min_refresh,
+    min_cpu_cores=4, min_year=min_year, min_refresh=min_refresh,
     alpha=balance
 )
 
-# --- Action: Recommend by Preferences ---
 recs = None
 if st.button("Show laptops"):
     with st.spinner("Finding good matches..."):
         recs = recommend_by_prefs(df, vec, X, prefs, "Hybrid", results_count)
 
 if recs is not None:
-    if recs.empty:
-        st.warning("No matching laptops found for your choices.")
-    else:
-        # use your nice card renderer
-        render_results(recs, style_bucket)
-        
-DEV_MODE= True
+    if recs.empty: st.warning("No matching laptops found for your choices.")
+    else: render_results(recs, style_bucket)
 
-if DEV_MODE:
-    with st.expander("Train/Test evaluation (Precision@K & Recall@K)"):
-        test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
-        k_eval = st.slider("K", 3, 20, 10, key="tt_k")
-        alpha_tt = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="tt_alpha")
-
-        if st.button("Run train/test evaluation"):
-            tr_df, te_df = split_df(df, test_size=test_size, label_col=LABEL_COL)
-            res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt, label_col=LABEL_COL)
-
-            st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
-            if LABEL_COL in df.columns:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("Train label counts")
-                    st.write(tr_df[LABEL_COL].value_counts(dropna=False))
-                with col2:
-                    st.write("Test label counts")
-                    st.write(te_df[LABEL_COL].value_counts(dropna=False))
-
-            st.dataframe(res, width="stretch")
-            if not res.empty:
-                st.write(f"**Mean F1@{k_eval}:** {res['f1@k'].mean():.3f}  |  **Mean MSE:** {res['mse'].mean():.4f}  |  **Mean RMSE:** {res['rmse'].mean():.4f}")
-
+# ── Evaluation
+with st.expander("Train/Test evaluation (Precision@K, Recall@K, F1@K, MSE/RMSE)"):
+    test_size = st.slider("Test size", 0.1, 0.5, 0.2, 0.05, key="tt_size")
+    k_eval    = st.slider("K", 3, 20, 10, key="tt_k")
+    alpha_tt  = st.slider("Hybrid α (content weight)", 0.0, 1.0, 0.6, 0.05, key="tt_alpha")
+    if st.button("Run train/test evaluation"):
+        tr_df, te_df = split_df(df, test_size=test_size, label_col=LABEL_COL)
+        res = evaluate_precision_recall_at_k_train_test(tr_df, te_df, k=k_eval, alpha=alpha_tt, label_col=LABEL_COL)
+        st.write(f"**Train:** {len(tr_df)}  |  **Test:** {len(te_df)}")
+        st.dataframe(res, width="stretch")
+        if not res.empty:
+            st.write(
+                f"**Mean Precision@{k_eval}:** {res['precision@k'].mean():.3f} | "
+                f"**Mean Recall@{k_eval}:** {res['recall@k'].mean():.3f} | "
+                f"**Mean F1@{k_eval}:** {res['f1@k'].mean():.3f} | "
+                f"**Mean MSE:** {res['mse'].mean():.4f} | **Mean RMSE:** {res['rmse'].mean():.4f}"
+            )
