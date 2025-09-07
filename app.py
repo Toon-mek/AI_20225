@@ -204,13 +204,14 @@ def build_pref_query(prefs: dict) -> str:
         parts += ["CREATOR_RES", "DISCRETE_GPU"]
     elif u == "business":
         parts += ["IGPU"]
+
     # numeric wishes (match tokens we added to spec_text)
     if prefs.get("min_ram"):        parts += [f"RAM{prefs['min_ram']}GB"]
     if prefs.get("min_vram"):       parts += [f"VRAM{prefs['min_vram']}GB"]
     if prefs.get("min_cpu_cores"):  parts += [f"CORES{prefs['min_cpu_cores']}"]
     if prefs.get("min_refresh"):    parts += [f"HZ{prefs['min_refresh']}HZ"]
     if prefs.get("min_storage"):    parts += [f"SSD{prefs['min_storage']}GB"]
-    if prefs.get("min_year"):       parts += [f"Y{prefs['min_year']}"]
+
     return " ".join([p for p in parts if p])
 
 def validate_prefs(prefs: dict) -> list[str]:
@@ -279,18 +280,17 @@ def make_filter_mask(df: pd.DataFrame, prefs: dict) -> pd.Series:
         s = pd.to_numeric(df.get(col), errors="coerce")
         return s.notna() & (s >= float(v))
 
-    # price is always applied (since user always picks a budget)
+    # budget is always applied
     if "price_myr" in df.columns:
         price = pd.to_numeric(df["price_myr"], errors="coerce")
         lo, hi = float(prefs.get("budget_min", 0)), float(prefs.get("budget_max", float("inf")))
         mask &= price.notna() & price.between(lo, hi, inclusive="both")
 
-    if prefs.get("min_ram")      is not None: mask &= ge("ram_base_GB", prefs["min_ram"])
-    if prefs.get("min_storage")  is not None: mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
-    if prefs.get("min_vram")     is not None: mask &= ge("gpu_vram_GB", prefs["min_vram"])
-    if prefs.get("min_cpu_cores")is not None: mask &= ge("cpu_cores", prefs["min_cpu_cores"])
-    if prefs.get("min_year")     is not None: mask &= ge("year", prefs["min_year"])
-    if prefs.get("min_refresh")  is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
+    if prefs.get("min_ram")       is not None: mask &= ge("ram_base_GB", prefs["min_ram"])
+    if prefs.get("min_storage")   is not None: mask &= ge("storage_primary_capacity_GB", prefs["min_storage"])
+    if prefs.get("min_vram")      is not None: mask &= ge("gpu_vram_GB", prefs["min_vram"])
+    if prefs.get("min_cpu_cores") is not None: mask &= ge("cpu_cores", prefs["min_cpu_cores"])
+    if prefs.get("min_refresh")   is not None: mask &= ge("display_refresh_Hz", prefs["min_refresh"])
 
     return mask
 
@@ -557,7 +557,6 @@ with st.expander("Advanced filters (optional)", expanded=False):
     ram_opts  = [ANY] + unique_nums(df, "ram_base_GB", as_int=True)
     stor_opts = [ANY] + unique_nums(df, "storage_primary_capacity_GB", as_int=True)
     vram_opts = [ANY] + unique_nums(df, "gpu_vram_GB", as_int=True, add_zero=True)
-    year_opts = [ANY] + unique_nums(df, "year", as_int=True)
     ref_opts  = [ANY] + unique_nums(df, "display_refresh_Hz", as_int=True)
 
     # reset filters to "Any" when style changes
@@ -567,7 +566,6 @@ with st.expander("Advanced filters (optional)", expanded=False):
         st.session_state.prev_style = style_bucket
         st.session_state["min_storage"] = ANY
         st.session_state["min_vram"]    = ANY
-        st.session_state["min_year"]    = ANY
         st.session_state["min_ram"]     = ANY
         st.session_state["min_refresh"] = ANY
 
@@ -576,16 +574,9 @@ with st.expander("Advanced filters (optional)", expanded=False):
             "Min Storage (GB)", options=stor_opts,
             key="min_storage", value=st.session_state.get("min_storage", ANY)
         )
-
-        # VRAM filter is available but optional for any style
         min_vram = st.select_slider(
             "Min GPU VRAM (GB)", options=vram_opts,
             key="min_vram", value=st.session_state.get("min_vram", ANY)
-        )
-
-        min_year = st.select_slider(
-            "Min Release Year", options=year_opts,
-            key="min_year", value=st.session_state.get("min_year", ANY)
         )
 
     with col2:
@@ -608,7 +599,6 @@ prefs = dict(
     min_storage=_val(st.session_state["min_storage"]),
     min_vram=_val(st.session_state["min_vram"]),
     min_cpu_cores=4,
-    min_year=_val(st.session_state["min_year"]),
     min_refresh=_val(st.session_state["min_refresh"]),
     alpha=0.6,
 )
