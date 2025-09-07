@@ -628,6 +628,22 @@ if recs is not None:
             with st.expander("Show/Hide more specs"): st.write(row.to_frame().T)
             st.markdown("---")
 
+with st.expander("Was this useful? (optional feedback)"):
+    with st.form("satisfaction_form"):
+        sat = st.slider("How satisfied are you with the top results?", 1, 5, 4)
+        comment = st.text_area("Any comments?")
+        submit = st.form_submit_button("Submit")
+        if submit:
+            import datetime
+            from pathlib import Path
+            row = {"ts": datetime.datetime.now().isoformat(), "satisfaction": sat, "comment": comment}
+            pd.DataFrame([row]).to_csv(
+                "feedback.csv",
+                mode="a", index=False,
+                header=not Path("feedback.csv").exists()
+            )
+            st.success("Thanks — feedback saved.")
+
 # ── Performance (fixed settings, no user tuning)
 with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
     res, n_tr, n_te, TS, K_FIXED, A_FIXED = evaluate_fixed(
