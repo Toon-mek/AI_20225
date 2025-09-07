@@ -629,7 +629,7 @@ if recs is not None:
 # ── Performance (fixed settings, no user tuning)
 with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
     res, n_tr, n_te, TS, K_FIXED, A_FIXED = evaluate_fixed(
-        df, LABEL_COL, test_size=0.30, k=5, alpha=0.55  # 70/30 split
+        df, LABEL_COL, test_size=0.40, k=5, alpha=0.55  # 70/30 split
     )
     st.write(f"**Train:** {n_tr}  |  **Test:** {n_te}")
     st.write(f"**Settings:** Test size = {TS:.2f}  |  K = {K_FIXED}  |  α = {A_FIXED:.2f}")
