@@ -57,14 +57,15 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             data[c] = np.nan if c in NUMERIC else ""
     data["model"] = data["model"].fillna("").astype(str)
     data = data[data["model"].str.len() > 0].copy()
+
     for c in NUMERIC:
         data[c] = pd.to_numeric(data[c], errors="coerce")
     for c in ["cpu_brand","gpu_brand","ram_type","storage_primary_type","display_resolution"]:
         data[c] = data[c].astype(str).str.upper()
     data["os"] = data["os"].astype(str).str.title()
 
-    def tok(v): 
-        s = str(v).strip(); 
+    def tok(v):
+        s = str(v).strip()
         return s if s else ""
     def numtok(prefix, v, unit=""):
         try:
@@ -85,31 +86,23 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             numtok("SIZE", r["display_size_in"], "IN"), tok(r["display_resolution"]),
             numtok("HZ", r["display_refresh_Hz"], "HZ"), tok(r["display_panel"]),
             numtok("BAT", r["battery_capacity_Wh"], "WH"), numtok("WT", r["weight_kg"], "KG"),
-            tok(r["os"]), numtok("Y", r["year"])
+            tok(r["os"]), f"USE {tok(r['intended_use_case'])}", numtok("Y", r["year"])
         ]
 
-        # --- engineered tokens (MUST be inside the loop) ---
+        # --- engineered tokens (now correctly inside the loop) ---
         gpu = str(r.get("gpu_model") or "").upper()
         hz  = pd.to_numeric(r.get("display_refresh_Hz"), errors="coerce")
         res = str(r.get("display_resolution") or "").upper()
 
-        parts.append("DISCRETE_GPU" if any(x in gpu for x in ("RTX","GTX","RX","ARC")) else "IGPU")
-        if pd.notna(hz) and hz >= 120:
-            parts.append("HZ120PLUS")
-        if any(x in res for x in ("2560","2880","3000","3200","3840","4K")):
-            parts.append("CREATOR_RES")
+        is_discrete = any(x in gpu for x in ["RTX","GTX","RX","ARC"])
+        creator_res = any(x in res for x in ["2560","2880","3000","3200","3840","4K"])
 
-        # normalize to our 3 buckets and add BUCKET_ token
-        t = str(r.get("intended_use_case") or "").lower()
-        if "game" in t:
-            bucket = "Gaming"
-        elif any(k in t for k in ("creator","content","video","design","workstation","pro")):
-            bucket = "Creator"
-        elif any(k in t for k in ("business","executive","programming","data")):
-            bucket = "Business"
-        else:
-            bucket = "Business"
-        parts.append(f"BUCKET_{bucket.upper()}")
+        parts += [
+            "DISCRETE_GPU" if is_discrete else "IGPU",
+            "HZ120PLUS" if (pd.notna(hz) and hz >= 120) else "",
+            "CREATOR_RES" if creator_res else ""
+        ]
+        # ---------------------------------------------------------
 
         text_parts.append(" ".join([p for p in parts if p]))
 
@@ -222,25 +215,26 @@ def price_proximity(view: pd.DataFrame, lo: float, hi: float) -> np.ndarray:
 
 def build_pref_query(prefs: dict) -> str:
     parts = []
-    u = (prefs.get("use_case") or "").strip()
-    if u:
-        parts.append(f"BUCKET_{u.upper()}")
+    u = (prefs.get("use_case") or "").lower()
 
-    ul = u.lower()
-    if ul == "gaming":
+    if prefs.get("use_case"):
+        parts += [f"USE {prefs['use_case']}"]
+
+    if u == "gaming":
         parts += ["DISCRETE_GPU", "HZ120PLUS"]
-    elif ul == "creator":
+    elif u == "creator":
         parts += ["CREATOR_RES", "DISCRETE_GPU"]
-    elif ul == "business":
+    elif u == "business":
         parts += ["IGPU"]
+    # numeric wishes
+    if prefs.get("min_ram"):        parts += [f"RAM{prefs['min_ram']}GB"]
+    if prefs.get("min_vram"):       parts += [f"VRAM{prefs['min_vram']}GB"]
+    if prefs.get("min_cpu_cores"):  parts += [f"CORES{prefs['min_cpu_cores']}"]
+    if prefs.get("min_refresh"):    parts += [f"HZ{prefs['min_refresh']}HZ"]
+    if prefs.get("min_storage"):    parts += [f"SSD{prefs['min_storage']}GB"]
+    if prefs.get("min_year"):       parts += [f"Y{prefs['min_year']}"]
 
-    if prefs.get("min_ram"): parts.append(f"RAM{prefs['min_ram']}GB")
-    if prefs.get("min_vram"): parts.append(f"VRAM{prefs['min_vram']}GB")
-    if prefs.get("min_cpu_cores"): parts.append(f"CORES{prefs['min_cpu_cores']}")
-    if prefs.get("min_refresh"): parts.append(f"HZ{prefs['min_refresh']}HZ")
-    if prefs.get("min_storage"): parts.append(f"SSD{prefs['min_storage']}GB")
-    if prefs.get("min_year"): parts.append(f"Y{prefs['min_year']}")
-    return " ".join(parts)
+    return " ".join([p for p in parts if p])
 
 def validate_prefs(prefs: dict) -> list[str]:
     errs = []
@@ -510,21 +504,6 @@ st.caption(f"{len(df)} laptops loaded from {'local file' if Path(DATA_PATH).exis
 
 # Label column -> normalize THEN collapse to 3 buckets
 LABEL_COL = "intended_use_case_norm"
-# ── Debug: make sure engineered tokens & class balance look right
-with st.expander("🧪 Debug — tokens & class balance", expanded=False):
-    st.write("**First 5 spec_text rows (should contain BUCKET_*, DISCRETE_GPU/HZ120PLUS/CREATOR_RES):**")
-    st.code("\n\n".join(df["spec_text"].head(5).tolist()))
-
-    st.write("**Overall label counts:**")
-    st.write(df[LABEL_COL].value_counts())
-
-    # Use the same test size you evaluate with
-    tr_dbg, te_dbg = split_df(df, test_size=0.40, label_col=LABEL_COL)
-    st.write("**Train label counts:**")
-    st.write(tr_dbg[LABEL_COL].value_counts())
-    st.write("**Test label counts:**")
-    st.write(te_dbg[LABEL_COL].value_counts())
-
 if "intended_use_case" in df.columns:
     df[LABEL_COL] = df["intended_use_case"].apply(normalize_use_case).apply(map_to_three)
 else:
