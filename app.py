@@ -630,7 +630,6 @@ if recs is not None:
 
 # ── Performance (fixed settings, no user tuning)
 with st.expander("Performance (Precision@K, Recall@K, F1@K, MSE/RMSE)", expanded=True):
-    st.write(df["intended_use_case_norm"].value_counts())
     res, n_tr, n_te, TS, K_FIXED, A_FIXED = evaluate_fixed(
         df, LABEL_COL, test_size=0.30, k=5, alpha=0.55  # 70/30 split
     )
